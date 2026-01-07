@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PDF Editor</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <section class="section">
+    <div class="container">
+      <h1 class="title">PDF Editor</h1>
+      <p class="subtitle">Minimal, in-browser cleanup for scanned books.</p>
+
+      <div class="box">
+        <div class="field is-grouped is-grouped-multiline">
+          <div class="control">
+            <div class="file is-small">
+              <label class="file-label">
+                <input id="fileInput" class="file-input" type="file" multiple accept="application/pdf" />
+                <span class="file-cta">
+                  <span class="file-label">Load PDFs</span>
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <div class="control">
+            <button id="rotateBtn" class="button is-small">Rotate 90°</button>
+          </div>
+          <div class="control">
+            <button id="splitBtn" class="button is-small">Split Pages</button>
+          </div>
+          <div class="control">
+            <button id="bwBtn" class="button is-small">Set B/W</button>
+          </div>
+          <div class="control">
+            <button id="colorBtn" class="button is-small">Set Color</button>
+          </div>
+          <div class="control">
+            <button id="deleteBtn" class="button is-small is-danger">Delete</button>
+          </div>
+
+          <div class="control">
+            <button id="undoBtn" class="button is-small">Undo</button>
+          </div>
+          <div class="control">
+            <button id="redoBtn" class="button is-small">Redo</button>
+          </div>
+
+          <div class="control">
+            <button id="saveBtn" class="button is-small is-primary">Save PDF</button>
+          </div>
+        </div>
+
+        <div class="field is-grouped is-grouped-multiline">
+          <div class="control">
+            <label class="checkbox">
+              <input id="compressToggle" type="checkbox" checked />
+              Compress (JPEG)
+            </label>
+          </div>
+        </div>
+
+        <progress id="progressBar" class="progress is-small is-info" value="0" max="100" hidden></progress>
+        <p id="status" class="is-size-7 has-text-grey"></p>
+      </div>
+
+      <div class="box">
+        <div class="level">
+          <div class="level-left">
+            <div class="level-item">
+              <label class="checkbox">
+                <input id="selectAll" type="checkbox" />
+                Select all
+              </label>
+            </div>
+          </div>
+          <div class="level-right">
+            <div class="level-item">
+              <span id="pageCount" class="tag">0 pages</span>
+            </div>
+          </div>
+        </div>
+        <div id="pageGrid" class="page-grid"></div>
+      </div>
+    </div>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

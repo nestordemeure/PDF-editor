@@ -1,27 +1,15 @@
 # PDF Editor
 
-## Goal
+Minimal, in-browser PDF cleanup tool for scanned books.
 
-A fully online (HTML, CSS, Javascript) pdf editor that can live in a Github page.
+## Usage
 
-It will run on book scans, helping us clean them up.
+- Open `index.html` in a browser.
+- Load one or more PDFs.
+- Select pages, then rotate, split, delete, or toggle B/W.
+- Drag thumbnails to reorder.
+- Click “Save PDF” to export.
 
-It needs to be able to:
-* load pdfs (one or more)
-* displaying all pages
-* being able to reorder pages
-* let you select pages (some or all) for editing
-    * be able to rotate pages (90degrees)
-    * be able to split pages down the middle (to split double pages)
-    * be able to delete pages
-* run OCR on the PDF (Tesseract?)
-* compress the images / pdf
-* set pages to black and white (no need to save useless color information)
-* save the pdf
-* have undo / redo buttons in case of mistake
+## Specs
 
-Note that we want a simple minimal interface, no need for functionality out of scope.
-
-Try not to reinvent the wheel, use existing libraries and framework where possible.
-
-CSS-wise, use an existing framework.
+See `SPECS.md`.
