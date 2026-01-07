@@ -1,10 +1,12 @@
 const TARGET_DPI = {
   color: { low: 180, medium: 150, high: 120 },
   gray: { low: 200, medium: 150, high: 120 },
-  bw: { low: 200, medium: 150, high: 120 },
+  bw: { low: 260, medium: 200, high: 150 },
 };
 
 const GRAY_LEVELS = { low: 16, medium: 8, high: 4 };
+import { binarizeCanvasAdaptive, binarizeCanvasOtsu, isOpenCvReady } from "./imageBinarization.js";
+
 const BW_THRESHOLD = 160;
 
 function getPageSizeInches(page) {
@@ -86,10 +88,16 @@ function quantizeBw(data) {
   }
 }
 
-function encodeBwPng1Bit(canvas) {
+function encodeBwPng1Bit(canvas, mode) {
+  if (!isOpenCvReady()) {
+    throw new Error("OpenCV not ready for B/W conversion.");
+  }
+  const usedOpenCv = mode === "bw-otsu" ? binarizeCanvasOtsu(canvas) : binarizeCanvasAdaptive(canvas);
   const ctx = canvas.getContext("2d");
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  quantizeBw(imgData.data);
+  if (!usedOpenCv) {
+    throw new Error("OpenCV failed to binarize B/W image.");
+  }
 
   const rowBytes = Math.ceil(canvas.width / 8);
   const packed = new Uint8Array(rowBytes * canvas.height);
@@ -122,11 +130,11 @@ function encodeBwPng1Bit(canvas) {
   return new Uint8Array(UPNG.encode([imgData.data.buffer], canvas.width, canvas.height, 0));
 }
 
-function encodePngFromCanvas(canvas, { levels = null, bw = false } = {}) {
+function encodePngFromCanvas(canvas, { levels = null, bw = false, mode = "bw" } = {}) {
   const ctx = canvas.getContext("2d");
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   if (bw) {
-    return encodeBwPng1Bit(canvas);
+    return encodeBwPng1Bit(canvas, mode);
   } else if (levels) {
     quantizeGrayscale(imgData.data, levels);
   }
@@ -158,8 +166,8 @@ export async function prepareImageForPdf({ page, compression, quality }) {
   const mode = page.mode;
   const compressionEnabled = compression !== "none";
   const useOriginal =
-    (!compressionEnabled && mode === "color") || (compressionEnabled && mode !== "color" && mode !== "bw");
-  const sourceCanvas = mode === "bw" ? page.canvas : useOriginal ? page.originalCanvas : page.canvas;
+    (!compressionEnabled && mode === "color") || (compressionEnabled && mode !== "color" && mode !== "bw" && mode !== "gray-jpeg");
+  const sourceCanvas = mode === "bw" || mode === "bw-otsu" ? page.canvas : useOriginal ? page.originalCanvas : page.canvas;
 
   const outputDpi = getOutputDpi(page, mode, compression);
   const outputSize = compressionEnabled ? getOutputPixelSize(page, outputDpi) : { width: sourceCanvas.width, height: sourceCanvas.height };
@@ -168,6 +176,10 @@ export async function prepareImageForPdf({ page, compression, quality }) {
   const workingCanvas = compressionEnabled
     ? makeScaledCanvas(sourceCanvas, outputSize.width, outputSize.height, { fillWhite, smooth })
     : sourceCanvas;
+
+  if (compressionEnabled && mode === "gray-jpeg") {
+    return { bytes: await canvasToJpegBytes(workingCanvas, quality), useJpeg: true };
+  }
 
   if (compressionEnabled && mode === "color") {
     return { bytes: await canvasToJpegBytes(workingCanvas, quality), useJpeg: true };
@@ -178,8 +190,8 @@ export async function prepareImageForPdf({ page, compression, quality }) {
     return { bytes: encodePngFromCanvas(workingCanvas, { levels }), useJpeg: false };
   }
 
-  if (mode === "bw") {
-    return { bytes: encodePngFromCanvas(workingCanvas, { bw: true }), useJpeg: false };
+  if (mode === "bw" || mode === "bw-otsu") {
+    return { bytes: encodePngFromCanvas(workingCanvas, { bw: true, mode }), useJpeg: false };
   }
 
   return { bytes: encodePngFromCanvas(workingCanvas), useJpeg: false };

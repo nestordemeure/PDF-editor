@@ -34,8 +34,4 @@ Functionalities:
 * sometimes pdfs are not scans but rather produced with Words, etc. how do we deal with that: do we convert them into images?
 * rename saved files
 * clicking on a tool (ie changing all images to b&W) causes a freeze then a very fast progress bar then done. why freeze? we should hand the thread instantly
-
-* improve color mode algorithms
-  * move corresponding logic to a dedicated file
-  * improve algorithms
-  * despeckle, background normalization, etc could improve png output sizes
+* memorize OICR so that i is not redone if we resave a document with no modification to pages?

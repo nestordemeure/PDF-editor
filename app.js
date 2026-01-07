@@ -32,6 +32,17 @@ let activePreviewId = null;
 let scribeModule = null;
 let progressFloor = 0;
 let progressLock = false;
+window.cvReady = false;
+window.onOpenCvReady = () => {
+  if (!window.cv) return;
+  if (window.cv.Mat) {
+    window.cvReady = true;
+    return;
+  }
+  window.cv.onRuntimeInitialized = () => {
+    window.cvReady = true;
+  };
+};
 
 function yieldToUi() {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));

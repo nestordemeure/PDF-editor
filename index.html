@@ -89,13 +89,15 @@
               <div class="field mt-2">
                 <div class="select is-small is-fullwidth is-light">
                   <select id="colorMode">
-                    <option value="color">Color</option>
-                    <option value="gray">Grayscale (8-bit)</option>
-                    <option value="gray4">Grayscale (4-bit)</option>
-                    <option value="bw">Black &amp; White (1-bit)</option>
-                  </select>
-                </div>
-              </div>
+                <option value="color">Original Colors</option>
+                <option value="gray-jpeg">Grayscale (JPEG)</option>
+                <option value="gray">Grayscale (8-bit)</option>
+                <option value="gray4">Grayscale (4-bit)</option>
+                <option value="bw-otsu">B&amp;W (flat)</option>
+                <option value="bw">B&amp;W (adaptive)</option>
+              </select>
+            </div>
+          </div>
 
               <hr class="my-3" />
 
@@ -144,6 +146,7 @@
   <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.min.js"></script>
+  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady()"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>
