@@ -1,3 +1,6 @@
+import { canvasToPngFile, prepareImageForPdf } from "./imagePipeline.js";
+import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection } from "./tools.js";
+
 const fileInput = document.getElementById("fileInput");
 const rotateBtn = document.getElementById("rotateBtn");
 const splitBtn = document.getElementById("splitBtn");
@@ -29,6 +32,10 @@ let activePreviewId = null;
 let scribeModule = null;
 let progressFloor = 0;
 let progressLock = false;
+
+function yieldToUi() {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
 
 function setStatus(message) {
   statusText.textContent = message;
@@ -69,6 +76,7 @@ function pushHistory() {
     originalDataUrl: page.originalCanvas.toDataURL("image/png"),
     width: page.canvas.width,
     height: page.canvas.height,
+    pageSizePts: { width: page.pageSizePts.width, height: page.pageSizePts.height },
   }));
   history.push(snapshot);
   if (history.length > 50) {
@@ -89,6 +97,7 @@ async function restoreSnapshot(snapshot) {
       canvas,
       originalCanvas,
       selected: false,
+      pageSizePts: item.pageSizePts || { width: item.width, height: item.height },
     });
   }
   pages = restored;
@@ -110,8 +119,108 @@ function dataUrlToCanvas(dataUrl, width, height) {
   });
 }
 
-function getCanvasContext(canvas, readFrequently = false) {
-  return canvas.getContext("2d", readFrequently ? { willReadFrequently: true } : undefined);
+function multiplyMatrix(a, b) {
+  return [
+    a[0] * b[0] + a[2] * b[1],
+    a[1] * b[0] + a[3] * b[1],
+    a[0] * b[2] + a[2] * b[3],
+    a[1] * b[2] + a[3] * b[3],
+    a[0] * b[4] + a[2] * b[5] + a[4],
+    a[1] * b[4] + a[3] * b[5] + a[5],
+  ];
+}
+
+async function getPdfImageObject(page, name, timeoutMs = 50) {
+  if (!name || !page?.objs?.get) return null;
+  return Promise.race([
+    new Promise((resolve) => {
+      try {
+        page.objs.get(name, (img) => resolve(img || null));
+      } catch {
+        resolve(null);
+      }
+    }),
+    new Promise((resolve) => {
+      setTimeout(() => resolve(null), timeoutMs);
+    }),
+  ]);
+}
+
+function getImageMetricsFromCtm(ctm, width, height) {
+  const widthPts = Math.hypot(ctm[0] * width, ctm[1] * width);
+  const heightPts = Math.hypot(ctm[2] * height, ctm[3] * height);
+  if (!Number.isFinite(widthPts) || !Number.isFinite(heightPts) || widthPts <= 0 || heightPts <= 0) return null;
+  const dpiX = width / (widthPts / 72);
+  const dpiY = height / (heightPts / 72);
+  if (!Number.isFinite(dpiX) || !Number.isFinite(dpiY) || dpiX <= 0 || dpiY <= 0) return null;
+  return { dpi: Math.min(dpiX, dpiY), areaPts: widthPts * heightPts };
+}
+
+async function getPageDpiFromImages(page, pageSizePts) {
+  const opList = await page.getOperatorList();
+  const ops = pdfjsLib.OPS || {};
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const stack = [];
+  let best = null;
+  const maxDpi = 600;
+  const pageAreaPts = pageSizePts ? pageSizePts.width * pageSizePts.height : null;
+  const minCoverage = 0.25;
+  const fullPageCoverage = 0.9;
+
+  for (let i = 0; i < opList.fnArray.length; i += 1) {
+    const fn = opList.fnArray[i];
+    const args = opList.argsArray[i];
+
+    if (fn === ops.save) {
+      stack.push(ctm.slice());
+      continue;
+    }
+    if (fn === ops.restore) {
+      ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
+      continue;
+    }
+    if (fn === ops.transform) {
+      ctm = multiplyMatrix(ctm, args);
+      continue;
+    }
+    if (fn === ops.setTransform) {
+      ctm = args;
+      continue;
+    }
+
+    if (fn === ops.paintInlineImageXObject) {
+      const inlineImg = args?.[0];
+      if (inlineImg?.width && inlineImg?.height) {
+        let metrics = getImageMetricsFromCtm(ctm, inlineImg.width, inlineImg.height);
+        if (metrics && pageAreaPts && metrics.areaPts / pageAreaPts >= fullPageCoverage) {
+          const dpiX = inlineImg.width / (pageSizePts.width / 72);
+          const dpiY = inlineImg.height / (pageSizePts.height / 72);
+          metrics = { dpi: Math.min(dpiX, dpiY), areaPts: pageAreaPts };
+        }
+        if (metrics && (!pageAreaPts || metrics.areaPts / pageAreaPts >= minCoverage) && (!best || metrics.areaPts > best.areaPts)) best = metrics;
+      }
+      continue;
+    }
+
+    if (fn === ops.paintImageXObject || fn === ops.paintImageXObjectRepeat) {
+      const name = args?.[0];
+      const img = await getPdfImageObject(page, name);
+      const width = img?.width;
+      const height = img?.height;
+      if (width && height) {
+        let metrics = getImageMetricsFromCtm(ctm, width, height);
+        if (metrics && pageAreaPts && metrics.areaPts / pageAreaPts >= fullPageCoverage) {
+          const dpiX = width / (pageSizePts.width / 72);
+          const dpiY = height / (pageSizePts.height / 72);
+          metrics = { dpi: Math.min(dpiX, dpiY), areaPts: pageAreaPts };
+        }
+        if (metrics && (!pageAreaPts || metrics.areaPts / pageAreaPts >= minCoverage) && (!best || metrics.areaPts > best.areaPts)) best = metrics;
+      }
+    }
+  }
+
+  if (!best?.dpi) return null;
+  return Math.min(best.dpi, maxDpi);
 }
 
 function getSelectedPages() {
@@ -233,40 +342,23 @@ async function normalizePdfBytes(result) {
   return null;
 }
 
-function canvasToPngFile(canvas, name) {
-  return new Promise((resolve) => {
-    canvas.toBlob((blob) => {
-      if (!blob) {
-        const dataUrl = canvas.toDataURL("image/png");
-        fetch(dataUrl)
-          .then((res) => res.blob())
-          .then((fallbackBlob) => resolve(new File([fallbackBlob], name, { type: "image/png" })));
-        return;
-      }
-      resolve(new File([blob], name, { type: "image/png" }));
-    }, "image/png");
-  });
-}
-
-async function buildPdfBytes({ useOriginalCanvas = false, useJpeg = false, quality = 0.85 } = {}) {
+async function buildPdfBytes({ compression, quality = 0.85 } = {}) {
   const pdfDoc = await PDFDocument.create();
   let index = 0;
   for (const page of pages) {
     index += 1;
     setProgress(index, pages.length);
-    const sourceCanvas = useOriginalCanvas ? page.originalCanvas : page.canvas;
-    const isBw = page.mode === "bw";
-    const useJpegForPage = useJpeg && !isBw && !useOriginalCanvas;
-    const dataUrl = sourceCanvas.toDataURL(useJpegForPage ? "image/jpeg" : "image/png", useJpegForPage ? quality : undefined);
-    const data = await fetch(dataUrl).then((res) => res.arrayBuffer());
-    const image = useJpegForPage ? await pdfDoc.embedJpg(data) : await pdfDoc.embedPng(data);
-    const pdfPage = pdfDoc.addPage([sourceCanvas.width, sourceCanvas.height]);
+    setStatus(`Saving PDF... ${index}/${pages.length}`);
+    const { bytes, useJpeg } = await prepareImageForPdf({ page, compression, quality });
+    const image = useJpeg ? await pdfDoc.embedJpg(bytes) : await pdfDoc.embedPng(bytes);
+    const pdfPage = pdfDoc.addPage([page.pageSizePts.width, page.pageSizePts.height]);
     pdfPage.drawImage(image, {
       x: 0,
       y: 0,
-      width: sourceCanvas.width,
-      height: sourceCanvas.height,
+      width: page.pageSizePts.width,
+      height: page.pageSizePts.height,
     });
+    await yieldToUi();
   }
   return pdfDoc.save();
 }
@@ -292,8 +384,8 @@ async function runOcrAndCreateTextPdf() {
     if (stage === "export") setStatus(`OCR: generating PDF ${stepInStage}/${pages.length}`);
   };
 
-  const imageFiles = await Promise.all(
-    pages.map((page, index) => canvasToPngFile(page.originalCanvas, `page_${String(index + 1).padStart(4, "0")}.png`))
+  const imageFiles = pages.map((page, index) =>
+    canvasToPngFile(page.originalCanvas, `page_${String(index + 1).padStart(4, "0")}.png`)
   );
 
   await scribe.importFiles({ imageFiles });
@@ -304,6 +396,8 @@ async function runOcrAndCreateTextPdf() {
   return normalizePdfBytes(textPdf);
 }
 
+const DEBUG_DPI = false;
+
 async function renderPdfToPages(file) {
   const buffer = await file.arrayBuffer();
   const loadingTask = pdfjsLib.getDocument({ data: buffer });
@@ -313,10 +407,24 @@ async function renderPdfToPages(file) {
     setStatus(`Rendering ${file.name} page ${i}/${pdf.numPages}`);
     setProgress(i, pdf.numPages);
     const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 1.5 });
+    const baseViewport = page.getViewport({ scale: 1 });
+    const pageDpi = await getPageDpiFromImages(page, { width: baseViewport.width, height: baseViewport.height });
+    let scale = pageDpi ? pageDpi / 72 : 2.5;
+    if (!Number.isFinite(scale) || scale <= 0) scale = 2.5;
+    let viewport = page.getViewport({ scale });
+    if (!Number.isFinite(viewport.width) || !Number.isFinite(viewport.height) || viewport.width < 1 || viewport.height < 1) {
+      viewport = page.getViewport({ scale: 1 });
+    }
+    if (!Number.isFinite(viewport.width) || !Number.isFinite(viewport.height) || viewport.width < 1 || viewport.height < 1) {
+      console.warn("Skipping zero-size page", { page: i, width: viewport.width, height: viewport.height });
+      continue;
+    }
+    if (DEBUG_DPI) {
+      console.log("Page DPI", { page: i, pageDpi, scale, base: { w: baseViewport.width, h: baseViewport.height }, viewport: { w: viewport.width, h: viewport.height } });
+    }
     const canvas = document.createElement("canvas");
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
+    canvas.width = Math.max(1, Math.round(viewport.width));
+    canvas.height = Math.max(1, Math.round(viewport.height));
     const ctx = canvas.getContext("2d");
     await page.render({ canvasContext: ctx, viewport }).promise;
     const originalCanvas = document.createElement("canvas");
@@ -330,105 +438,13 @@ async function renderPdfToPages(file) {
       canvas,
       originalCanvas,
       selected: false,
+      pageSizePts: { width: baseViewport.width, height: baseViewport.height },
     });
   }
   setProgress(0, 0);
   return renderedPages;
 }
 
-function rotateCanvas(canvas, clockwise = true) {
-  const rotated = document.createElement("canvas");
-  rotated.width = canvas.height;
-  rotated.height = canvas.width;
-  const ctx = rotated.getContext("2d");
-  if (clockwise) {
-    ctx.translate(rotated.width, 0);
-    ctx.rotate(Math.PI / 2);
-  } else {
-    ctx.translate(0, rotated.height);
-    ctx.rotate(-Math.PI / 2);
-  }
-  ctx.drawImage(canvas, 0, 0);
-  return rotated;
-}
-
-function applyGrayscale(canvas) {
-  const ctx = getCanvasContext(canvas, true);
-  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const data = imgData.data;
-  for (let i = 0; i < data.length; i += 4) {
-    const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-    data[i] = gray;
-    data[i + 1] = gray;
-    data[i + 2] = gray;
-  }
-  ctx.putImageData(imgData, 0, 0);
-}
-
-function applyPosterize(canvas, levels) {
-  const ctx = getCanvasContext(canvas, true);
-  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const data = imgData.data;
-  const step = 255 / (levels - 1);
-  for (let i = 0; i < data.length; i += 4) {
-    const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-    const bucket = Math.round(gray / step) * step;
-    const value = Math.max(0, Math.min(255, bucket));
-    data[i] = value;
-    data[i + 1] = value;
-    data[i + 2] = value;
-  }
-  ctx.putImageData(imgData, 0, 0);
-}
-
-function applyThreshold(canvas, threshold = 160) {
-  const ctx = getCanvasContext(canvas, true);
-  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const data = imgData.data;
-  for (let i = 0; i < data.length; i += 4) {
-    const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-    const value = gray > threshold ? 255 : 0;
-    data[i] = value;
-    data[i + 1] = value;
-    data[i + 2] = value;
-  }
-  ctx.putImageData(imgData, 0, 0);
-}
-
-function applyModeToCanvas(mode, originalCanvas) {
-  const copy = cloneCanvas(originalCanvas);
-  if (mode === "gray") {
-    applyGrayscale(copy);
-  } else if (mode === "gray4") {
-    applyPosterize(copy, 16);
-  } else if (mode === "bw") {
-    applyThreshold(copy, 160);
-  }
-  return copy;
-}
-
-function cloneCanvas(source) {
-  const copy = document.createElement("canvas");
-  copy.width = source.width;
-  copy.height = source.height;
-  copy.getContext("2d").drawImage(source, 0, 0);
-  return copy;
-}
-
-function splitCanvas(canvas) {
-  const mid = Math.floor(canvas.width / 2);
-  const left = document.createElement("canvas");
-  left.width = mid;
-  left.height = canvas.height;
-  left.getContext("2d").drawImage(canvas, 0, 0, mid, canvas.height, 0, 0, mid, canvas.height);
-
-  const right = document.createElement("canvas");
-  right.width = canvas.width - mid;
-  right.height = canvas.height;
-  right.getContext("2d").drawImage(canvas, mid, 0, canvas.width - mid, canvas.height, 0, 0, canvas.width - mid, canvas.height);
-
-  return [left, right];
-}
 
 async function handleFiles(files) {
   if (!files.length) return;
@@ -454,12 +470,17 @@ rotateBtn.addEventListener("click", () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
   pushHistory();
-  selected.forEach((page) => {
-    page.canvas = rotateCanvas(page.canvas, true);
-    page.originalCanvas = rotateCanvas(page.originalCanvas, true);
-    page.rotation = (page.rotation + 90) % 360;
-  });
-  renderPages();
+  progressLock = true;
+  progressFloor = 0;
+  setProgress(0, selected.length);
+  setStatus(`Rotating ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
+  (async () => {
+    await rotateSelection({ pages, setProgress, setStatus, yieldToUi });
+    progressLock = false;
+    renderPages();
+    endProgress();
+    setStatus("Rotation complete.");
+  })();
 });
 
 colorModeSelect.addEventListener("change", () => {
@@ -467,53 +488,53 @@ colorModeSelect.addEventListener("change", () => {
   if (selected.length === 0) return;
   const mode = colorModeSelect.value;
   pushHistory();
-  selected.forEach((page) => {
-    page.mode = mode;
-    page.canvas = applyModeToCanvas(mode, page.originalCanvas);
-  });
-  renderPages();
+  progressLock = true;
+  progressFloor = 0;
+  setProgress(0, selected.length);
+  setStatus(`Applying color mode to ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
+  (async () => {
+    await applyColorModeToSelection({ pages, mode, setProgress, setStatus, yieldToUi });
+    progressLock = false;
+    renderPages();
+    endProgress();
+    setStatus("Color mode updated.");
+  })();
 });
 
 splitBtn.addEventListener("click", () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
   pushHistory();
-  const nextPages = [];
-  pages.forEach((page) => {
-    if (!page.selected) {
-      nextPages.push(page);
-      return;
-    }
-    const [leftOriginal, rightOriginal] = splitCanvas(page.originalCanvas);
-    const left = applyModeToCanvas(page.mode, leftOriginal);
-    const right = applyModeToCanvas(page.mode, rightOriginal);
-    nextPages.push({
-      id: `p_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      rotation: page.rotation,
-      mode: page.mode,
-      canvas: left,
-      originalCanvas: leftOriginal,
-      selected: false,
-    });
-    nextPages.push({
-      id: `p_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      rotation: page.rotation,
-      mode: page.mode,
-      canvas: right,
-      originalCanvas: rightOriginal,
-      selected: false,
-    });
-  });
-  pages = nextPages;
-  renderPages();
+  progressLock = true;
+  progressFloor = 0;
+  setProgress(0, pages.length);
+  setStatus(`Splitting pages...`);
+  (async () => {
+    const nextPages = await splitSelection({ pages, setProgress, setStatus, yieldToUi });
+    progressLock = false;
+    pages = nextPages;
+    renderPages();
+    endProgress();
+    setStatus("Split complete.");
+  })();
 });
 
 deleteBtn.addEventListener("click", () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
   pushHistory();
-  pages = pages.filter((page) => !page.selected);
-  renderPages();
+  progressLock = true;
+  progressFloor = 0;
+  setProgress(0, pages.length);
+  setStatus(`Deleting ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
+  (async () => {
+    const nextPages = await deleteSelection({ pages, setProgress, setStatus, yieldToUi });
+    progressLock = false;
+    pages = nextPages;
+    renderPages();
+    endProgress();
+    setStatus("Delete complete.");
+  })();
 });
 
 selectAllToggle.addEventListener("change", () => {
@@ -535,6 +556,7 @@ undoBtn.addEventListener("click", async () => {
     originalDataUrl: page.originalCanvas.toDataURL("image/png"),
     width: page.canvas.width,
     height: page.canvas.height,
+    pageSizePts: { width: page.pageSizePts.width, height: page.pageSizePts.height },
   }));
   future.push(currentSnapshot);
   await restoreSnapshot(snapshot);
@@ -551,6 +573,7 @@ redoBtn.addEventListener("click", async () => {
     originalDataUrl: page.originalCanvas.toDataURL("image/png"),
     width: page.canvas.width,
     height: page.canvas.height,
+    pageSizePts: { width: page.pageSizePts.width, height: page.pageSizePts.height },
   }));
   history.push(currentSnapshot);
   await restoreSnapshot(snapshot);
@@ -560,13 +583,12 @@ saveBtn.addEventListener("click", async () => {
   if (pages.length === 0) return;
   setStatus("Saving PDF...");
   const compression = compressionLevel.value;
-  const useJpeg = compression !== "none";
   const quality = compression === "low" ? 0.95 : compression === "medium" ? 0.85 : compression === "high" ? 0.70 : 0.85;
-  let pdfBytes = await buildPdfBytes({ useOriginalCanvas: false, useJpeg, quality });
+  let pdfBytes = await buildPdfBytes({ compression, quality });
 
   if (ocrLang.value !== "none") {
     try {
-      setStatus("Running OCR on original-color images... (this can take a while)");
+      setStatus("Running OCR on original images... (this can take a while)");
       setProgress(0, 0);
       const textPdfBytes = await runOcrAndCreateTextPdf();
       if (textPdfBytes) {
@@ -574,19 +596,18 @@ saveBtn.addEventListener("click", async () => {
         const pageCount = Math.min(textDoc.getPageCount(), pages.length);
         for (let i = 0; i < pageCount; i += 1) {
           setProgress(i + 1, pageCount);
-          const sourceCanvas = pages[i].canvas;
-          const isBw = pages[i].mode === "bw";
-          const useJpegForPage = useJpeg && !isBw;
-          const dataUrl = sourceCanvas.toDataURL(useJpegForPage ? "image/jpeg" : "image/png", useJpegForPage ? quality : undefined);
-          const data = await fetch(dataUrl).then((res) => res.arrayBuffer());
-          const image = useJpegForPage ? await textDoc.embedJpg(data) : await textDoc.embedPng(data);
-          const page = textDoc.getPage(i);
-          page.drawImage(image, {
+          setStatus(`OCR: embedding images ${i + 1}/${pageCount}`);
+          const imagePage = textDoc.getPage(i);
+          imagePage.setSize(pages[i].pageSizePts.width, pages[i].pageSizePts.height);
+          const { bytes, useJpeg } = await prepareImageForPdf({ page: pages[i], compression, quality });
+          const image = useJpeg ? await textDoc.embedJpg(bytes) : await textDoc.embedPng(bytes);
+          imagePage.drawImage(image, {
             x: 0,
             y: 0,
-            width: page.getWidth(),
-            height: page.getHeight(),
+            width: imagePage.getWidth(),
+            height: imagePage.getHeight(),
           });
+          await yieldToUi();
         }
         pdfBytes = await textDoc.save();
         setStatus("OCR complete. Saving searchable PDF...");
