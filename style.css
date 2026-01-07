@@ -30,6 +30,11 @@ body {
   gap: 0.5rem;
 }
 
+.buttons-vertical select {
+  background-color: whitesmoke;
+  text-align: center;
+}
+
 /* Center - Pages */
 .pages-main {
   min-width: 0;
