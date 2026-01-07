@@ -11,9 +11,11 @@
 <body>
   <section class="section">
     <div class="container">
+      <!-- Header -->
       <h1 class="title">PDF Editor</h1>
       <p class="subtitle">Minimal, in-browser cleanup for scanned books.</p>
 
+      <!-- Loading & Saving Controls -->
       <div class="box">
         <div class="field is-grouped is-grouped-multiline">
           <div class="control">
@@ -27,37 +29,6 @@
             </div>
           </div>
 
-          <div class="control">
-            <button id="rotateBtn" class="button is-small">Rotate 90°</button>
-          </div>
-          <div class="control">
-            <button id="splitBtn" class="button is-small">Split Double Page</button>
-          </div>
-          <div class="control">
-            <div class="select is-small">
-              <select id="colorMode">
-                <option value="color">Color</option>
-                <option value="gray">Grayscale (8-bit)</option>
-                <option value="gray4">Grayscale (4-bit)</option>
-                <option value="bw">Black &amp; White (1-bit)</option>
-              </select>
-            </div>
-          </div>
-          <div class="control">
-            <button id="deleteBtn" class="button is-small is-danger">Delete</button>
-          </div>
-
-          <div class="control">
-            <button id="undoBtn" class="button is-small">Undo</button>
-          </div>
-          <div class="control">
-            <button id="redoBtn" class="button is-small">Redo</button>
-          </div>
-        </div>
-
-        <p class="is-size-7 has-text-grey mb-2">Select pages below to edit them, then use the tools above.</p>
-
-        <div class="field is-grouped is-grouped-multiline">
           <div class="control">
             <label class="checkbox">
               <input id="compressToggle" type="checkbox" checked />
@@ -107,8 +78,42 @@
         <p id="status" class="is-size-7 has-text-grey"></p>
       </div>
 
-      <div class="columns">
-        <div class="column is-two-thirds">
+      <!-- Three Column Layout -->
+      <div class="three-column-layout">
+        <!-- Left Column: Page Operations -->
+        <aside class="operations-sidebar">
+          <div class="box">
+            <h2 class="title is-6 mb-3">Page Operations</h2>
+            <p class="is-size-7 has-text-grey mb-3">Select pages, then use tools below.</p>
+
+            <div class="buttons-vertical">
+              <button id="rotateBtn" class="button is-small is-fullwidth">Rotate 90°</button>
+              <button id="splitBtn" class="button is-small is-fullwidth">Split Double Page</button>
+
+              <div class="field mt-2">
+                <label class="label is-size-7">Color Mode</label>
+                <div class="select is-small is-fullwidth">
+                  <select id="colorMode">
+                    <option value="color">Color</option>
+                    <option value="gray">Grayscale (8-bit)</option>
+                    <option value="gray4">Grayscale (4-bit)</option>
+                    <option value="bw">Black &amp; White (1-bit)</option>
+                  </select>
+                </div>
+              </div>
+
+              <button id="deleteBtn" class="button is-small is-danger is-fullwidth">Delete</button>
+
+              <hr class="my-3" />
+
+              <button id="undoBtn" class="button is-small is-fullwidth">Undo</button>
+              <button id="redoBtn" class="button is-small is-fullwidth">Redo</button>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Center Column: Pages Grid -->
+        <main class="pages-main">
           <div class="box">
             <div class="level">
               <div class="level-left">
@@ -127,14 +132,16 @@
             </div>
             <div id="pageGrid" class="page-grid"></div>
           </div>
-        </div>
-        <div class="column is-one-third">
+        </main>
+
+        <!-- Right Column: Preview -->
+        <aside class="preview-sidebar">
           <div class="box">
             <h2 class="title is-6">Preview</h2>
             <canvas id="previewCanvas" class="preview-canvas"></canvas>
             <p id="previewLabel" class="is-size-7 has-text-grey mt-2">Click a page to preview it.</p>
           </div>
-        </div>
+        </aside>
       </div>
     </div>
   </section>

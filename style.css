@@ -8,6 +8,54 @@ body {
   color: var(--ink);
 }
 
+/* Three Column Layout */
+.three-column-layout {
+  display: grid;
+  grid-template-columns: 200px 1fr 320px;
+  gap: 1rem;
+  align-items: start;
+}
+
+/* Left Sidebar - Operations */
+.operations-sidebar {
+  position: sticky;
+  top: 1rem;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+
+.buttons-vertical {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* Center - Pages */
+.pages-main {
+  min-width: 0;
+}
+
+/* Right Sidebar - Preview */
+.preview-sidebar {
+  position: sticky;
+  top: 1rem;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+
+/* Responsive Design */
+@media screen and (max-width: 1024px) {
+  .three-column-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .operations-sidebar,
+  .preview-sidebar {
+    position: static;
+    max-height: none;
+  }
+}
+
 .page-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
