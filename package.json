@@ -1,0 +1,24 @@
+{
+  "name": "pdf-editor",
+  "version": "1.0.0",
+  "description": "Minimal, in-browser PDF cleanup tool for scanned books.",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nestordemeure/PDF-editor.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/nestordemeure/PDF-editor/issues"
+  },
+  "homepage": "https://github.com/nestordemeure/PDF-editor#readme",
+  "dependencies": {
+    "scribe.js-ocr": "^0.9.3"
+  }
+}

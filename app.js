@@ -16,6 +16,8 @@ const jpegQuality = document.getElementById("jpegQuality");
 const jpegQualityValue = document.getElementById("jpegQualityValue");
 const previewCanvas = document.getElementById("previewCanvas");
 const previewLabel = document.getElementById("previewLabel");
+const ocrToggle = document.getElementById("ocrToggle");
+const ocrLang = document.getElementById("ocrLang");
 
 const pdfjsLib = window["pdfjs-dist/build/pdf"];
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
@@ -27,6 +29,9 @@ let history = [];
 let future = [];
 let sortable = null;
 let activePreviewId = null;
+let scribeModule = null;
+let progressFloor = 0;
+let progressLock = false;
 
 function setStatus(message) {
   statusText.textContent = message;
@@ -39,7 +44,19 @@ function setProgress(value, max) {
   }
   progressBar.hidden = false;
   progressBar.max = max;
-  progressBar.value = value;
+  if (progressLock) {
+    progressFloor = Math.max(progressFloor, value);
+    progressBar.value = progressFloor;
+  } else {
+    progressBar.value = value;
+  }
+}
+
+function endProgress() {
+  progressLock = false;
+  progressFloor = 0;
+  progressBar.value = 0;
+  progressBar.hidden = true;
 }
 
 function updatePageCount() {
@@ -94,6 +111,10 @@ function dataUrlToCanvas(dataUrl, width, height) {
     };
     img.src = dataUrl;
   });
+}
+
+function getCanvasContext(canvas, readFrequently = false) {
+  return canvas.getContext("2d", readFrequently ? { willReadFrequently: true } : undefined);
 }
 
 function getSelectedPages() {
@@ -199,6 +220,93 @@ function updatePreviewAfterRender() {
   setPreview(page);
 }
 
+async function loadScribe() {
+  if (scribeModule) return scribeModule;
+  const moduleUrl = new URL("./vendor/scribe.js", import.meta.url);
+  const module = await import(moduleUrl.href);
+  scribeModule = module.default || module;
+  return scribeModule;
+}
+
+async function normalizePdfBytes(result) {
+  if (!result) return null;
+  if (result instanceof Uint8Array) return result;
+  if (result instanceof ArrayBuffer) return new Uint8Array(result);
+  if (result instanceof Blob) return new Uint8Array(await result.arrayBuffer());
+  return null;
+}
+
+function canvasToPngFile(canvas, name) {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        const dataUrl = canvas.toDataURL("image/png");
+        fetch(dataUrl)
+          .then((res) => res.blob())
+          .then((fallbackBlob) => resolve(new File([fallbackBlob], name, { type: "image/png" })));
+        return;
+      }
+      resolve(new File([blob], name, { type: "image/png" }));
+    }, "image/png");
+  });
+}
+
+async function buildPdfBytes({ useOriginalCanvas = false, useJpeg = false, quality = 0.85 } = {}) {
+  const pdfDoc = await PDFDocument.create();
+  let index = 0;
+  for (const page of pages) {
+    index += 1;
+    setProgress(index, pages.length);
+    const sourceCanvas = useOriginalCanvas ? page.originalCanvas : page.canvas;
+    const isBw = page.mode === "bw";
+    const useJpegForPage = useJpeg && !isBw && !useOriginalCanvas;
+    const dataUrl = sourceCanvas.toDataURL(useJpegForPage ? "image/jpeg" : "image/png", useJpegForPage ? quality : undefined);
+    const data = await fetch(dataUrl).then((res) => res.arrayBuffer());
+    const image = useJpegForPage ? await pdfDoc.embedJpg(data) : await pdfDoc.embedPng(data);
+    const pdfPage = pdfDoc.addPage([sourceCanvas.width, sourceCanvas.height]);
+    pdfPage.drawImage(image, {
+      x: 0,
+      y: 0,
+      width: sourceCanvas.width,
+      height: sourceCanvas.height,
+    });
+  }
+  return pdfDoc.save();
+}
+
+async function runOcrAndCreateTextPdf() {
+  const scribe = await loadScribe();
+  await scribe.init({ ocr: true, font: true, pdf: true });
+  scribe.opt.displayMode = "ebook";
+  scribe.opt.intermediatePDF = false;
+  progressLock = true;
+  progressFloor = 0;
+  const stageOrder = ["importImage", "convert", "export"];
+  const totalSteps = Math.max(1, pages.length * stageOrder.length);
+  scribe.opt.progressHandler = (message) => {
+    if (!message || typeof message.n !== "number") return;
+    const stage = message.type || "ocr";
+    const stageIndex = Math.max(0, stageOrder.indexOf(stage));
+    const stepInStage = Math.min(message.n + 1, pages.length);
+    const overallStep = Math.min(stageIndex * pages.length + stepInStage, totalSteps);
+    setProgress(overallStep, totalSteps);
+    if (stage === "importImage") setStatus(`OCR: loading images ${stepInStage}/${pages.length}`);
+    if (stage === "convert") setStatus(`OCR: recognizing ${stepInStage}/${pages.length}`);
+    if (stage === "export") setStatus(`OCR: generating PDF ${stepInStage}/${pages.length}`);
+  };
+
+  const imageFiles = await Promise.all(
+    pages.map((page, index) => canvasToPngFile(page.originalCanvas, `page_${String(index + 1).padStart(4, "0")}.png`))
+  );
+
+  await scribe.importFiles({ imageFiles });
+  await scribe.recognize({ langs: [ocrLang.value] });
+  const textPdf = await scribe.exportData("pdf");
+  await scribe.clear();
+  progressLock = false;
+  return normalizePdfBytes(textPdf);
+}
+
 async function renderPdfToPages(file) {
   const buffer = await file.arrayBuffer();
   const loadingTask = pdfjsLib.getDocument({ data: buffer });
@@ -248,7 +356,7 @@ function rotateCanvas(canvas, clockwise = true) {
 }
 
 function applyGrayscale(canvas) {
-  const ctx = canvas.getContext("2d");
+  const ctx = getCanvasContext(canvas, true);
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const data = imgData.data;
   for (let i = 0; i < data.length; i += 4) {
@@ -261,7 +369,7 @@ function applyGrayscale(canvas) {
 }
 
 function applyPosterize(canvas, levels) {
-  const ctx = canvas.getContext("2d");
+  const ctx = getCanvasContext(canvas, true);
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const data = imgData.data;
   const step = 255 / (levels - 1);
@@ -277,7 +385,7 @@ function applyPosterize(canvas, levels) {
 }
 
 function applyThreshold(canvas, threshold = 160) {
-  const ctx = canvas.getContext("2d");
+  const ctx = getCanvasContext(canvas, true);
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const data = imgData.data;
   for (let i = 0; i < data.length; i += 4) {
@@ -454,27 +562,47 @@ redoBtn.addEventListener("click", async () => {
 saveBtn.addEventListener("click", async () => {
   if (pages.length === 0) return;
   setStatus("Saving PDF...");
-  const pdfDoc = await PDFDocument.create();
-  const useJpeg = compressToggle.checked;
   const quality = parseFloat(jpegQuality.value);
-  let index = 0;
-  for (const page of pages) {
-    index += 1;
-    setProgress(index, pages.length);
-    const isBw = page.mode === "bw";
-    const useJpegForPage = useJpeg && !isBw;
-    const dataUrl = page.canvas.toDataURL(useJpegForPage ? "image/jpeg" : "image/png", useJpegForPage ? quality : undefined);
-    const data = await fetch(dataUrl).then((res) => res.arrayBuffer());
-    const image = useJpegForPage ? await pdfDoc.embedJpg(data) : await pdfDoc.embedPng(data);
-    const pdfPage = pdfDoc.addPage([page.canvas.width, page.canvas.height]);
-    pdfPage.drawImage(image, {
-      x: 0,
-      y: 0,
-      width: page.canvas.width,
-      height: page.canvas.height,
-    });
+  const useJpeg = compressToggle.checked;
+  let pdfBytes = await buildPdfBytes({ useOriginalCanvas: false, useJpeg, quality });
+
+  if (ocrToggle.checked) {
+    try {
+      setStatus("Running OCR on original-color images... (this can take a while)");
+      setProgress(0, 0);
+      const textPdfBytes = await runOcrAndCreateTextPdf();
+      if (textPdfBytes) {
+        const textDoc = await PDFDocument.load(textPdfBytes);
+        const pageCount = Math.min(textDoc.getPageCount(), pages.length);
+        for (let i = 0; i < pageCount; i += 1) {
+          setProgress(i + 1, pageCount);
+          const sourceCanvas = pages[i].canvas;
+          const isBw = pages[i].mode === "bw";
+          const useJpegForPage = useJpeg && !isBw;
+          const dataUrl = sourceCanvas.toDataURL(useJpegForPage ? "image/jpeg" : "image/png", useJpegForPage ? quality : undefined);
+          const data = await fetch(dataUrl).then((res) => res.arrayBuffer());
+          const image = useJpegForPage ? await textDoc.embedJpg(data) : await textDoc.embedPng(data);
+          const page = textDoc.getPage(i);
+          page.drawImage(image, {
+            x: 0,
+            y: 0,
+            width: page.getWidth(),
+            height: page.getHeight(),
+          });
+        }
+        pdfBytes = await textDoc.save();
+        setStatus("OCR complete. Saving searchable PDF...");
+      } else {
+        setStatus("OCR completed, but output was unreadable. Saving without OCR.");
+      }
+    } catch (error) {
+      console.error(error);
+      setStatus("OCR failed. Saving without OCR.");
+    } finally {
+      progressLock = false;
+    }
   }
-  const pdfBytes = await pdfDoc.save();
+
   const blob = new Blob([pdfBytes], { type: "application/pdf" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -484,7 +612,7 @@ saveBtn.addEventListener("click", async () => {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
-  setProgress(0, 0);
+  endProgress();
   setStatus("Saved edited.pdf");
 });
 
