@@ -14,5 +14,4 @@ Minimal, in-browser PDF cleanup tool for scanned books.
 
 * the UI is ugly
 * improve color mode algorithms?
-* add display of single pages for visualization sake?
 * add OCR

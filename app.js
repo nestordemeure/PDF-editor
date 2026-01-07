@@ -14,6 +14,8 @@ const statusText = document.getElementById("status");
 const compressToggle = document.getElementById("compressToggle");
 const jpegQuality = document.getElementById("jpegQuality");
 const jpegQualityValue = document.getElementById("jpegQualityValue");
+const previewCanvas = document.getElementById("previewCanvas");
+const previewLabel = document.getElementById("previewLabel");
 
 const pdfjsLib = window["pdfjs-dist/build/pdf"];
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
@@ -24,6 +26,7 @@ let pages = [];
 let history = [];
 let future = [];
 let sortable = null;
+let activePreviewId = null;
 
 function setStatus(message) {
   statusText.textContent = message;
@@ -144,6 +147,7 @@ function renderPages() {
       page.selected = !page.selected;
       checkbox.checked = page.selected;
       syncSelectAll();
+      setPreview(page);
     });
 
     pageGrid.appendChild(card);
@@ -152,6 +156,7 @@ function renderPages() {
   updatePageCount();
   syncSelectAll();
   setupSortable();
+  updatePreviewAfterRender();
 }
 
 function setupSortable() {
@@ -171,6 +176,27 @@ function setupSortable() {
       renderPages();
     },
   });
+}
+
+function setPreview(page) {
+  activePreviewId = page.id;
+  const ctx = previewCanvas.getContext("2d");
+  previewCanvas.width = page.canvas.width;
+  previewCanvas.height = page.canvas.height;
+  ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+  ctx.drawImage(page.canvas, 0, 0);
+  previewLabel.textContent = `Previewing page #${pages.findIndex((p) => p.id === page.id) + 1}`;
+}
+
+function updatePreviewAfterRender() {
+  if (!pages.length) {
+    previewCanvas.width = 0;
+    previewCanvas.height = 0;
+    previewLabel.textContent = "Click a page to preview it.";
+    return;
+  }
+  const page = pages.find((p) => p.id === activePreviewId) || pages[0];
+  setPreview(page);
 }
 
 async function renderPdfToPages(file) {

@@ -51,6 +51,10 @@ body {
   font-size: 11px;
 }
 
-#ocrOutput {
-  font-family: "Courier New", Courier, monospace;
+.preview-canvas {
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+  border: 1px solid #e2dcd3;
+  background: #fafafa;
 }

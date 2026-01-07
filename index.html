@@ -77,23 +77,34 @@
         <p id="status" class="is-size-7 has-text-grey"></p>
       </div>
 
-      <div class="box">
-        <div class="level">
-          <div class="level-left">
-            <div class="level-item">
-              <label class="checkbox">
-                <input id="selectAll" type="checkbox" />
-                Select all
-              </label>
+      <div class="columns">
+        <div class="column is-two-thirds">
+          <div class="box">
+            <div class="level">
+              <div class="level-left">
+                <div class="level-item">
+                  <label class="checkbox">
+                    <input id="selectAll" type="checkbox" />
+                    Select all
+                  </label>
+                </div>
+              </div>
+              <div class="level-right">
+                <div class="level-item">
+                  <span id="pageCount" class="tag">0 pages</span>
+                </div>
+              </div>
             </div>
-          </div>
-          <div class="level-right">
-            <div class="level-item">
-              <span id="pageCount" class="tag">0 pages</span>
-            </div>
+            <div id="pageGrid" class="page-grid"></div>
           </div>
         </div>
-        <div id="pageGrid" class="page-grid"></div>
+        <div class="column is-one-third">
+          <div class="box">
+            <h2 class="title is-6">Preview</h2>
+            <canvas id="previewCanvas" class="preview-canvas"></canvas>
+            <p id="previewLabel" class="is-size-7 has-text-grey mt-2">Click a page to preview it.</p>
+          </div>
+        </div>
       </div>
     </div>
   </section>
