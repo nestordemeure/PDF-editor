@@ -32,4 +32,7 @@ cp -R node_modules/scribe.js-ocr/mupdf vendor/mupdf
 
 Functionalities:
 * improve color mode algorithms
+* sometimes pdfs are not scans but rather produced with Words, etc. how do we deal with that: do we convert them into images?
+
 * improve compression
+  * preserve original DPI
