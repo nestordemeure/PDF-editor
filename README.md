@@ -10,6 +10,9 @@ Minimal, in-browser PDF cleanup tool for scanned books.
 - Drag thumbnails to reorder.
 - Click “Save PDF” to export.
 
-## Specs
+## TODO
 
-See `SPECS.md`.
+* the UI is ugly
+* improve color mode algorithms?
+* add display of single pages for visualization sake?
+* add OCR

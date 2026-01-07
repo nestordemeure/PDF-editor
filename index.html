@@ -30,13 +30,17 @@
             <button id="rotateBtn" class="button is-small">Rotate 90°</button>
           </div>
           <div class="control">
-            <button id="splitBtn" class="button is-small">Split Pages</button>
+            <button id="splitBtn" class="button is-small">Split Double Page</button>
           </div>
           <div class="control">
-            <button id="bwBtn" class="button is-small">Set B/W</button>
-          </div>
-          <div class="control">
-            <button id="colorBtn" class="button is-small">Set Color</button>
+            <div class="select is-small">
+              <select id="colorMode">
+                <option value="color">Color</option>
+                <option value="gray">Grayscale (8-bit)</option>
+                <option value="gray4">Grayscale (4-bit)</option>
+                <option value="bw">Black &amp; White (1-bit)</option>
+              </select>
+            </div>
           </div>
           <div class="control">
             <button id="deleteBtn" class="button is-small is-danger">Delete</button>
@@ -48,18 +52,24 @@
           <div class="control">
             <button id="redoBtn" class="button is-small">Redo</button>
           </div>
-
-          <div class="control">
-            <button id="saveBtn" class="button is-small is-primary">Save PDF</button>
-          </div>
         </div>
+
+        <p class="is-size-7 has-text-grey mb-2">Select pages below to edit them, then use the tools above.</p>
 
         <div class="field is-grouped is-grouped-multiline">
           <div class="control">
             <label class="checkbox">
               <input id="compressToggle" type="checkbox" checked />
-              Compress (JPEG)
+              Compress (JPEG for color/gray)
             </label>
+          </div>
+          <div class="control">
+            <label class="label is-size-7">JPEG quality</label>
+            <input id="jpegQuality" class="slider is-small" type="range" min="0.5" max="0.95" step="0.01" value="0.85" />
+            <span id="jpegQualityValue" class="is-size-7">0.85</span>
+          </div>
+          <div class="control">
+            <button id="saveBtn" class="button is-small is-primary">Save PDF</button>
           </div>
         </div>
 

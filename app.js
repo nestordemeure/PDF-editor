@@ -1,8 +1,7 @@
 const fileInput = document.getElementById("fileInput");
 const rotateBtn = document.getElementById("rotateBtn");
 const splitBtn = document.getElementById("splitBtn");
-const bwBtn = document.getElementById("bwBtn");
-const colorBtn = document.getElementById("colorBtn");
+const colorModeSelect = document.getElementById("colorMode");
 const deleteBtn = document.getElementById("deleteBtn");
 const undoBtn = document.getElementById("undoBtn");
 const redoBtn = document.getElementById("redoBtn");
@@ -13,6 +12,8 @@ const pageCount = document.getElementById("pageCount");
 const progressBar = document.getElementById("progressBar");
 const statusText = document.getElementById("status");
 const compressToggle = document.getElementById("compressToggle");
+const jpegQuality = document.getElementById("jpegQuality");
+const jpegQualityValue = document.getElementById("jpegQualityValue");
 
 const pdfjsLib = window["pdfjs-dist/build/pdf"];
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
@@ -46,7 +47,7 @@ function pushHistory() {
   const snapshot = pages.map((page) => ({
     id: page.id,
     rotation: page.rotation,
-    bw: page.bw,
+    mode: page.mode,
     dataUrl: page.canvas.toDataURL("image/png"),
     originalDataUrl: page.originalCanvas.toDataURL("image/png"),
     width: page.canvas.width,
@@ -67,7 +68,7 @@ async function restoreSnapshot(snapshot) {
     restored.push({
       id: item.id,
       rotation: item.rotation,
-      bw: item.bw,
+      mode: item.mode,
       canvas,
       originalCanvas,
       selected: false,
@@ -194,7 +195,7 @@ async function renderPdfToPages(file) {
     renderedPages.push({
       id: `p_${Date.now()}_${Math.random().toString(16).slice(2)}`,
       rotation: 0,
-      bw: false,
+      mode: "color",
       canvas,
       originalCanvas,
       selected: false,
@@ -231,6 +232,48 @@ function applyGrayscale(canvas) {
     data[i + 2] = gray;
   }
   ctx.putImageData(imgData, 0, 0);
+}
+
+function applyPosterize(canvas, levels) {
+  const ctx = canvas.getContext("2d");
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imgData.data;
+  const step = 255 / (levels - 1);
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+    const bucket = Math.round(gray / step) * step;
+    const value = Math.max(0, Math.min(255, bucket));
+    data[i] = value;
+    data[i + 1] = value;
+    data[i + 2] = value;
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function applyThreshold(canvas, threshold = 160) {
+  const ctx = canvas.getContext("2d");
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imgData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+    const value = gray > threshold ? 255 : 0;
+    data[i] = value;
+    data[i + 1] = value;
+    data[i + 2] = value;
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function applyModeToCanvas(mode, originalCanvas) {
+  const copy = cloneCanvas(originalCanvas);
+  if (mode === "gray") {
+    applyGrayscale(copy);
+  } else if (mode === "gray4") {
+    applyPosterize(copy, 16);
+  } else if (mode === "bw") {
+    applyThreshold(copy, 160);
+  }
+  return copy;
 }
 
 function cloneCanvas(source) {
@@ -288,30 +331,14 @@ rotateBtn.addEventListener("click", () => {
   renderPages();
 });
 
-bwBtn.addEventListener("click", () => {
+colorModeSelect.addEventListener("change", () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
+  const mode = colorModeSelect.value;
   pushHistory();
   selected.forEach((page) => {
-    if (!page.bw) {
-      const copy = cloneCanvas(page.originalCanvas);
-      applyGrayscale(copy);
-      page.canvas = copy;
-      page.bw = true;
-    }
-  });
-  renderPages();
-});
-
-colorBtn.addEventListener("click", () => {
-  const selected = getSelectedPages();
-  if (selected.length === 0) return;
-  pushHistory();
-  selected.forEach((page) => {
-    if (page.bw) {
-      page.canvas = cloneCanvas(page.originalCanvas);
-      page.bw = false;
-    }
+    page.mode = mode;
+    page.canvas = applyModeToCanvas(mode, page.originalCanvas);
   });
   renderPages();
 });
@@ -327,18 +354,12 @@ splitBtn.addEventListener("click", () => {
       return;
     }
     const [leftOriginal, rightOriginal] = splitCanvas(page.originalCanvas);
-    let left = leftOriginal;
-    let right = rightOriginal;
-    if (page.bw) {
-      left = cloneCanvas(leftOriginal);
-      right = cloneCanvas(rightOriginal);
-      applyGrayscale(left);
-      applyGrayscale(right);
-    }
+    const left = applyModeToCanvas(page.mode, leftOriginal);
+    const right = applyModeToCanvas(page.mode, rightOriginal);
     nextPages.push({
       id: `p_${Date.now()}_${Math.random().toString(16).slice(2)}`,
       rotation: page.rotation,
-      bw: page.bw,
+      mode: page.mode,
       canvas: left,
       originalCanvas: leftOriginal,
       selected: false,
@@ -346,7 +367,7 @@ splitBtn.addEventListener("click", () => {
     nextPages.push({
       id: `p_${Date.now()}_${Math.random().toString(16).slice(2)}`,
       rotation: page.rotation,
-      bw: page.bw,
+      mode: page.mode,
       canvas: right,
       originalCanvas: rightOriginal,
       selected: false,
@@ -378,7 +399,7 @@ undoBtn.addEventListener("click", async () => {
   const currentSnapshot = pages.map((page) => ({
     id: page.id,
     rotation: page.rotation,
-    bw: page.bw,
+    mode: page.mode,
     dataUrl: page.canvas.toDataURL("image/png"),
     originalDataUrl: page.originalCanvas.toDataURL("image/png"),
     width: page.canvas.width,
@@ -394,7 +415,7 @@ redoBtn.addEventListener("click", async () => {
   const currentSnapshot = pages.map((page) => ({
     id: page.id,
     rotation: page.rotation,
-    bw: page.bw,
+    mode: page.mode,
     dataUrl: page.canvas.toDataURL("image/png"),
     originalDataUrl: page.originalCanvas.toDataURL("image/png"),
     width: page.canvas.width,
@@ -409,13 +430,16 @@ saveBtn.addEventListener("click", async () => {
   setStatus("Saving PDF...");
   const pdfDoc = await PDFDocument.create();
   const useJpeg = compressToggle.checked;
+  const quality = parseFloat(jpegQuality.value);
   let index = 0;
   for (const page of pages) {
     index += 1;
     setProgress(index, pages.length);
-    const dataUrl = page.canvas.toDataURL(useJpeg ? "image/jpeg" : "image/png", useJpeg ? 0.75 : undefined);
+    const isBw = page.mode === "bw";
+    const useJpegForPage = useJpeg && !isBw;
+    const dataUrl = page.canvas.toDataURL(useJpegForPage ? "image/jpeg" : "image/png", useJpegForPage ? quality : undefined);
     const data = await fetch(dataUrl).then((res) => res.arrayBuffer());
-    const image = useJpeg ? await pdfDoc.embedJpg(data) : await pdfDoc.embedPng(data);
+    const image = useJpegForPage ? await pdfDoc.embedJpg(data) : await pdfDoc.embedPng(data);
     const pdfPage = pdfDoc.addPage([page.canvas.width, page.canvas.height]);
     pdfPage.drawImage(image, {
       x: 0,
@@ -439,3 +463,9 @@ saveBtn.addEventListener("click", async () => {
 });
 
 setStatus("Load one or more PDFs to begin.");
+
+jpegQuality.addEventListener("input", () => {
+  jpegQualityValue.textContent = Number(jpegQuality.value).toFixed(2);
+});
+
+jpegQualityValue.textContent = Number(jpegQuality.value).toFixed(2);
