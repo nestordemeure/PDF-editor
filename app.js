@@ -11,12 +11,9 @@ const pageGrid = document.getElementById("pageGrid");
 const pageCount = document.getElementById("pageCount");
 const progressBar = document.getElementById("progressBar");
 const statusText = document.getElementById("status");
-const compressToggle = document.getElementById("compressToggle");
-const jpegQuality = document.getElementById("jpegQuality");
-const jpegQualityValue = document.getElementById("jpegQualityValue");
+const compressionLevel = document.getElementById("compressionLevel");
 const previewCanvas = document.getElementById("previewCanvas");
 const previewLabel = document.getElementById("previewLabel");
-const ocrToggle = document.getElementById("ocrToggle");
 const ocrLang = document.getElementById("ocrLang");
 
 const pdfjsLib = window["pdfjs-dist/build/pdf"];
@@ -562,11 +559,12 @@ redoBtn.addEventListener("click", async () => {
 saveBtn.addEventListener("click", async () => {
   if (pages.length === 0) return;
   setStatus("Saving PDF...");
-  const quality = parseFloat(jpegQuality.value);
-  const useJpeg = compressToggle.checked;
+  const compression = compressionLevel.value;
+  const useJpeg = compression !== "none";
+  const quality = compression === "low" ? 0.95 : compression === "medium" ? 0.85 : compression === "high" ? 0.70 : 0.85;
   let pdfBytes = await buildPdfBytes({ useOriginalCanvas: false, useJpeg, quality });
 
-  if (ocrToggle.checked) {
+  if (ocrLang.value !== "none") {
     try {
       setStatus("Running OCR on original-color images... (this can take a while)");
       setProgress(0, 0);
@@ -617,9 +615,3 @@ saveBtn.addEventListener("click", async () => {
 });
 
 setStatus("Load one or more PDFs to begin.");
-
-jpegQuality.addEventListener("input", () => {
-  jpegQualityValue.textContent = Number(jpegQuality.value).toFixed(2);
-});
-
-jpegQualityValue.textContent = Number(jpegQuality.value).toFixed(2);

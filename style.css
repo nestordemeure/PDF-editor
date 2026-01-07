@@ -111,3 +111,9 @@ body {
   border: 1px solid #e2dcd3;
   background: #fafafa;
 }
+
+/* Center text in dropdown menus */
+.select select {
+  text-align: center;
+  text-align-last: center;
+}

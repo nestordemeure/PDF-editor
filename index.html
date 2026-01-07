@@ -30,26 +30,21 @@
           </div>
 
           <div class="control">
-            <label class="checkbox">
-              <input id="compressToggle" type="checkbox" checked />
-              Compress (JPEG for color/gray)
-            </label>
+            <div class="select is-small">
+              <select id="compressionLevel">
+                <option value="none">No Compression</option>
+                <option value="low" selected>Low Compression (JPEG 95%)</option>
+                <option value="medium">Medium Compression (JPEG 85%)</option>
+                <option value="high">High Compression (JPEG 70%)</option>
+              </select>
+            </div>
           </div>
-          <div class="control">
-            <label class="label is-size-7">JPEG quality</label>
-            <input id="jpegQuality" class="slider is-small" type="range" min="0.5" max="0.95" step="0.01" value="0.85" />
-            <span id="jpegQualityValue" class="is-size-7">0.85</span>
-          </div>
-          <div class="control">
-            <label class="checkbox">
-              <input id="ocrToggle" type="checkbox" />
-              OCR (searchable text layer)
-            </label>
-          </div>
+
           <div class="control">
             <div class="select is-small">
               <select id="ocrLang">
-                <option value="eng" selected>English</option>
+                <option value="none" selected>No OCR</option>
+                <option value="eng">English</option>
                 <option value="fra">French</option>
                 <option value="deu">German</option>
                 <option value="spa">Spanish</option>
@@ -69,6 +64,7 @@
               </select>
             </div>
           </div>
+
           <div class="control">
             <button id="saveBtn" class="button is-small is-primary">Save PDF</button>
           </div>
