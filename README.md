@@ -31,5 +31,5 @@ cp -R node_modules/scribe.js-ocr/mupdf vendor/mupdf
 ## TODO
 
 Functionalities:
-* improve color mode algorithms?
-* improve output compression
+* improve color mode algorithms
+* improve compression
