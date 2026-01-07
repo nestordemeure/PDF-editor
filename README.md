@@ -32,14 +32,8 @@ cp -R node_modules/scribe.js-ocr/mupdf vendor/mupdf
 
 Functionalities:
 * improve color mode algorithms
+  * move corresponding logic to a dedicated file
+  * improve algorithms
 * sometimes pdfs are not scans but rather produced with Words, etc. how do we deal with that: do we convert them into images?
-
-* improve compression handling:
-  * all PNG should be exported with UPNG (already loaded in index.html)
-  * no compression:
-     * we should preserve original DPIs (note that pdfs can have varying DPIs, different on various pages)
-     * we should use either original images (if no color mode was changed on them) or lossless PNG (if their color mode was changed)
-  * if some level of compression is enabled: 
-    * color images should be jpeg (we expect them to be photographs)
-    * greyscale/b&w images should be PNG (they can be lossy according to the level of compression picked), we expect them to be text (mostly black on white)
-    * use fixed DPI for outputs (use meaningful defaults for color / greyscale / b&w), using the maximum of the input image DPI and the target value for a given color mode / compression level
+* rename saved files
+* clicking on a tool (ie changing all images to b&W) causes a freeze then a very fast progress bar then done. why freeze? we should hand the thread instantly

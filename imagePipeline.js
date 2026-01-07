@@ -1,7 +1,7 @@
 const TARGET_DPI = {
-  color: { low: 200, medium: 180, high: 150 },
-  gray: { low: 250, medium: 220, high: 180 },
-  bw: { low: 300, medium: 240, high: 200 },
+  color: { low: 180, medium: 150, high: 120 },
+  gray: { low: 200, medium: 150, high: 120 },
+  bw: { low: 200, medium: 150, high: 120 },
 };
 
 const GRAY_LEVELS = { low: 16, medium: 8, high: 4 };
@@ -86,11 +86,47 @@ function quantizeBw(data) {
   }
 }
 
+function encodeBwPng1Bit(canvas) {
+  const ctx = canvas.getContext("2d");
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  quantizeBw(imgData.data);
+
+  const rowBytes = Math.ceil(canvas.width / 8);
+  const packed = new Uint8Array(rowBytes * canvas.height);
+  let out = 0;
+  for (let y = 0; y < canvas.height; y += 1) {
+    let byte = 0;
+    let bit = 7;
+    for (let x = 0; x < canvas.width; x += 1) {
+      const i = (y * canvas.width + x) * 4;
+      const v = imgData.data[i] > 127 ? 1 : 0;
+      byte |= v << bit;
+      bit -= 1;
+      if (bit < 0) {
+        packed[out++] = byte;
+        byte = 0;
+        bit = 7;
+      }
+    }
+    if (bit !== 7) packed[out++] = byte;
+  }
+
+  if (typeof UPNG.encodeLL === "function") {
+    try {
+      return new Uint8Array(UPNG.encodeLL([packed.buffer], canvas.width, canvas.height, 1, 0, 1));
+    } catch {
+      // fall through to RGBA encoding below
+    }
+  }
+
+  return new Uint8Array(UPNG.encode([imgData.data.buffer], canvas.width, canvas.height, 0));
+}
+
 function encodePngFromCanvas(canvas, { levels = null, bw = false } = {}) {
   const ctx = canvas.getContext("2d");
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   if (bw) {
-    quantizeBw(imgData.data);
+    return encodeBwPng1Bit(canvas);
   } else if (levels) {
     quantizeGrayscale(imgData.data, levels);
   }
@@ -121,13 +157,14 @@ function canvasToJpegBytes(canvas, quality) {
 export async function prepareImageForPdf({ page, compression, quality }) {
   const mode = page.mode;
   const compressionEnabled = compression !== "none";
-  const useOriginal = (!compressionEnabled && mode === "color") || (compressionEnabled && mode !== "color");
-  const sourceCanvas = useOriginal ? page.originalCanvas : page.canvas;
+  const useOriginal =
+    (!compressionEnabled && mode === "color") || (compressionEnabled && mode !== "color" && mode !== "bw");
+  const sourceCanvas = mode === "bw" ? page.canvas : useOriginal ? page.originalCanvas : page.canvas;
 
   const outputDpi = getOutputDpi(page, mode, compression);
   const outputSize = compressionEnabled ? getOutputPixelSize(page, outputDpi) : { width: sourceCanvas.width, height: sourceCanvas.height };
   const fillWhite = compressionEnabled && mode !== "color";
-  const smooth = !(compressionEnabled && mode === "bw");
+  const smooth = !(mode === "bw");
   const workingCanvas = compressionEnabled
     ? makeScaledCanvas(sourceCanvas, outputSize.width, outputSize.height, { fillWhite, smooth })
     : sourceCanvas;
@@ -141,7 +178,7 @@ export async function prepareImageForPdf({ page, compression, quality }) {
     return { bytes: encodePngFromCanvas(workingCanvas, { levels }), useJpeg: false };
   }
 
-  if (compressionEnabled && mode === "bw") {
+  if (mode === "bw") {
     return { bytes: encodePngFromCanvas(workingCanvas, { bw: true }), useJpeg: false };
   }
 
