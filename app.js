@@ -424,6 +424,201 @@ async function normalizePdfBytes(result) {
   return null;
 }
 
+function concatUint8Arrays(chunks) {
+  let total = 0;
+  for (const chunk of chunks) total += chunk.length;
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result;
+}
+
+function encodeAscii(text) {
+  return new TextEncoder().encode(text);
+}
+
+function recompressPdfBytesWithPako(pdfBytes, { onProgress, onStatus } = {}) {
+  if (!window.pako || !pdfBytes) return pdfBytes;
+  const bytes = pdfBytes instanceof Uint8Array ? pdfBytes : new Uint8Array(pdfBytes);
+  const decoder = new TextDecoder("iso-8859-1");
+  const text = decoder.decode(bytes);
+  const parts = [];
+  let cursor = 0;
+  let streamsRecompressed = 0;
+  let streamsTotal = 0;
+
+  const streamToken = "stream";
+  const endstreamToken = "endstream";
+
+  function findStreamDataStart(streamIndex) {
+    let i = streamIndex + streamToken.length;
+    if (bytes[i] === 0x0d && bytes[i + 1] === 0x0a) return i + 2;
+    if (bytes[i] === 0x0a || bytes[i] === 0x0d) return i + 1;
+    return i;
+  }
+
+  function parseLength(dictText) {
+    const match = dictText.match(/\/Length\s+(\d+)\b/);
+    if (!match) return null;
+    return Number.parseInt(match[1], 10);
+  }
+
+  function hasPredictor(dictText) {
+    return /\/Predictor\s+\d+/.test(dictText);
+  }
+
+  function isOnlyFlate(dictText) {
+    const match = dictText.match(/\/Filter\s*(\[[^\]]+\]|\/[A-Za-z0-9]+)\b/);
+    if (!match) return false;
+    const filterValue = match[1].trim();
+    if (filterValue.startsWith("[")) {
+      const names = filterValue.match(/\/[A-Za-z0-9]+/g) || [];
+      return names.length === 1 && names[0] === "/FlateDecode";
+    }
+    return filterValue === "/FlateDecode";
+  }
+
+  function replaceLength(dictText, nextLength) {
+    return dictText.replace(/\/Length\s+\d+\b/, `/Length ${nextLength}`);
+  }
+
+  // Count eligible streams first for progress reporting.
+  {
+    let scanIndex = 0;
+    while (true) {
+      const streamIndex = text.indexOf(streamToken, scanIndex);
+      if (streamIndex === -1) break;
+      scanIndex = streamIndex + streamToken.length;
+      const dictEnd = text.lastIndexOf(">>", streamIndex);
+      const dictStart = text.lastIndexOf("<<", dictEnd);
+      if (dictStart < 0 || dictEnd < 0) continue;
+      const dictText = text.slice(dictStart + 2, dictEnd);
+      if (!isOnlyFlate(dictText) || hasPredictor(dictText)) continue;
+      const length = parseLength(dictText);
+      if (!Number.isFinite(length)) continue;
+      streamsTotal += 1;
+    }
+  }
+
+  if (streamsTotal > 0 && onStatus) onStatus(`Optimizing ${streamsTotal} PDF stream${streamsTotal === 1 ? "" : "s"}...`);
+  if (streamsTotal > 0 && onProgress) onProgress(0, streamsTotal);
+
+  let searchIndex = 0;
+  while (true) {
+    const streamIndex = text.indexOf(streamToken, searchIndex);
+    if (streamIndex === -1) break;
+    searchIndex = streamIndex + streamToken.length;
+
+    const dictEnd = text.lastIndexOf(">>", streamIndex);
+    const dictStart = text.lastIndexOf("<<", dictEnd);
+    if (dictStart < 0 || dictEnd < 0) continue;
+    const dictText = text.slice(dictStart + 2, dictEnd);
+    if (!isOnlyFlate(dictText) || hasPredictor(dictText)) continue;
+    const length = parseLength(dictText);
+    if (!Number.isFinite(length)) continue;
+
+    const dataStart = findStreamDataStart(streamIndex);
+    const dataEnd = dataStart + length;
+    if (dataEnd > bytes.length) continue;
+    const endstreamIndex = text.indexOf(endstreamToken, dataEnd);
+    if (endstreamIndex === -1) continue;
+
+    const originalData = bytes.subarray(dataStart, dataEnd);
+    let inflated;
+    try {
+      inflated = window.pako.inflate(originalData);
+    } catch (error) {
+      console.warn("Skipping stream recompression (inflate failed).", error);
+      continue;
+    }
+    const recompressed = window.pako.deflate(inflated, { level: 9 });
+    const nextDictText = replaceLength(dictText, recompressed.length);
+    const nextDictBytes = encodeAscii(`<<${nextDictText}>>`);
+
+    parts.push(bytes.subarray(cursor, dictStart));
+    parts.push(nextDictBytes);
+    parts.push(bytes.subarray(dictEnd + 2, dataStart));
+    parts.push(recompressed);
+    parts.push(bytes.subarray(dataEnd, endstreamIndex + endstreamToken.length));
+    cursor = endstreamIndex + endstreamToken.length;
+    streamsRecompressed += 1;
+    if (onProgress) onProgress(streamsRecompressed, streamsTotal || streamsRecompressed);
+  }
+
+  if (streamsRecompressed === 0) return bytes;
+  parts.push(bytes.subarray(cursor));
+  return concatUint8Arrays(parts);
+}
+
+function rebuildXrefAndTrailer(pdfBytes) {
+  const bytes = pdfBytes instanceof Uint8Array ? pdfBytes : new Uint8Array(pdfBytes);
+  const decoder = new TextDecoder("iso-8859-1");
+  const text = decoder.decode(bytes);
+  const startxrefIndex = text.lastIndexOf("startxref");
+  if (startxrefIndex === -1) return bytes;
+
+  const trailerIndex = text.lastIndexOf("trailer", startxrefIndex);
+  if (trailerIndex === -1) return bytes;
+  const xrefIndex = text.lastIndexOf("xref", trailerIndex);
+  if (xrefIndex === -1) return bytes;
+  const trailerStart = text.indexOf("<<", trailerIndex);
+  const trailerEnd = text.indexOf(">>", trailerStart);
+  if (trailerStart === -1 || trailerEnd === -1) return bytes;
+  const trailerDict = text.slice(trailerStart + 2, trailerEnd);
+
+  const rootMatch = trailerDict.match(/\/Root\s+(\d+\s+\d+\s+R)\b/);
+  if (!rootMatch) return bytes;
+  const infoMatch = trailerDict.match(/\/Info\s+(\d+\s+\d+\s+R)\b/);
+  const idMatch = trailerDict.match(/\/ID\s+\[[^\]]+\]/);
+  const encryptMatch = trailerDict.match(/\/Encrypt\s+(\d+\s+\d+\s+R)\b/);
+
+  const body = bytes.subarray(0, xrefIndex);
+  const bodyText = decoder.decode(body);
+  const objectRegex = /(^|[\r\n])(\d+)\s+(\d+)\s+obj\b/g;
+  const objectOffsets = new Map();
+  let match;
+  while ((match = objectRegex.exec(bodyText)) !== null) {
+    const offset = match.index + match[1].length;
+    const objNum = Number.parseInt(match[2], 10);
+    if (!Number.isFinite(objNum)) continue;
+    objectOffsets.set(objNum, offset);
+  }
+
+  const maxObj = Math.max(0, ...objectOffsets.keys());
+  const size = maxObj + 1;
+  const xrefLines = [];
+  xrefLines.push("xref\n");
+  xrefLines.push(`0 ${size}\n`);
+  xrefLines.push("0000000000 65535 f \n");
+  for (let i = 1; i < size; i += 1) {
+    const offset = objectOffsets.get(i);
+    if (Number.isFinite(offset)) {
+      xrefLines.push(`${String(offset).padStart(10, "0")} 00000 n \n`);
+    } else {
+      xrefLines.push("0000000000 00000 f \n");
+    }
+  }
+
+  const trailerParts = [];
+  trailerParts.push("trailer\n<<\n");
+  trailerParts.push(`/Size ${size}\n`);
+  trailerParts.push(`/Root ${rootMatch[1]}\n`);
+  if (infoMatch) trailerParts.push(`/Info ${infoMatch[1]}\n`);
+  if (encryptMatch) trailerParts.push(`/Encrypt ${encryptMatch[1]}\n`);
+  if (idMatch) trailerParts.push(`${idMatch[0]}\n`);
+  trailerParts.push(">>\n");
+
+  const xrefOffset = body.length;
+  const xrefBytes = encodeAscii(xrefLines.join(""));
+  const trailerBytes = encodeAscii(trailerParts.join(""));
+  const startxrefBytes = encodeAscii(`startxref\n${xrefOffset}\n%%EOF\n`);
+
+  return concatUint8Arrays([body, xrefBytes, trailerBytes, startxrefBytes]);
+}
+
 async function buildPdfBytes({ compression, quality = 0.85 } = {}) {
   const pdfDoc = await PDFDocument.create();
   let index = 0;
@@ -447,7 +642,7 @@ async function buildPdfBytes({ compression, quality = 0.85 } = {}) {
   setStatus("Finalizing PDF...");
   setProgress(totalSteps, totalSteps);
   await yieldToUi();
-  return pdfDoc.save();
+  return pdfDoc.save({ useObjectStreams: false });
 }
 
 async function runOcrAndCreateTextPdf() {
@@ -699,7 +894,7 @@ saveBtn.addEventListener("click", async () => {
         setStatus("Finalizing PDF...");
         setProgress(pageCount, pageCount);
         await yieldToUi();
-        pdfBytes = await textDoc.save();
+        pdfBytes = await textDoc.save({ useObjectStreams: false });
         setStatus("OCR complete. Saving searchable PDF...");
       } else {
         setStatus("OCR completed, but output was unreadable. Saving without OCR.");
@@ -712,6 +907,14 @@ saveBtn.addEventListener("click", async () => {
     }
   }
 
+  setStatus("Optimizing PDF streams for size...");
+  setProgress(0, 1);
+  pdfBytes = rebuildXrefAndTrailer(
+    recompressPdfBytesWithPako(pdfBytes, {
+      onProgress: setProgress,
+      onStatus: setStatus,
+    })
+  );
   const blob = new Blob([pdfBytes], { type: "application/pdf" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
