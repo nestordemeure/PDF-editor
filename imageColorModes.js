@@ -80,11 +80,7 @@ export function removeShading(canvas, blurRadius = 20, strength = 1.2) {
   // Subtract low frequencies from original (high-pass filter)
   const result = originalData;
 
-  // Step 1: Apply high-pass filter and find min/max
-  let min = 255;
-  let max = 0;
-  const values = [];
-
+  // Apply high-pass filter: add details back to white background
   for (let i = 0; i < result.data.length; i += 4) {
     // Convert to grayscale
     let grayOriginal = 0.299 * originalData.data[i] + 0.587 * originalData.data[i + 1] + 0.114 * originalData.data[i + 2];
@@ -97,31 +93,58 @@ export function removeShading(canvas, blurRadius = 20, strength = 1.2) {
     // Background (diff≈0) becomes white (255)
     // Text (diff<0) becomes darker than white
     const value = Math.max(0, Math.min(255, 255 + diff));
-    values.push(value);
-
-    if (value < min) min = value;
-    if (value > max) max = value;
-  }
-
-  // Step 2: Apply min-max normalization
-  const range = max - min;
-  let valueIndex = 0;
-
-  for (let i = 0; i < result.data.length; i += 4) {
-    const value = values[valueIndex++];
-
-    // Min-max normalization: stretch [min, max] to [0, 255]
-    const normalized = range > 0 ? ((value - min) / range) * 255 : value;
 
     // Apply to all RGB channels
-    result.data[i] = normalized;
-    result.data[i + 1] = normalized;
-    result.data[i + 2] = normalized;
+    result.data[i] = value;
+    result.data[i + 1] = value;
+    result.data[i + 2] = value;
     // Alpha channel stays the same
   }
 
   // Put the processed data back
   ctx.putImageData(result, 0, 0);
+}
+
+// Min-max normalization to maximize contrast
+export function enhanceContrast(canvas) {
+  const ctx = getCanvasContext(canvas, true);
+  const width = canvas.width;
+  const height = canvas.height;
+
+  // Get image data
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
+
+  // Step 1: Find min and max values
+  let min = 255;
+  let max = 0;
+
+  for (let i = 0; i < data.length; i += 4) {
+    // Convert to grayscale
+    const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    if (gray < min) min = gray;
+    if (gray > max) max = gray;
+  }
+
+  // Step 2: Apply min-max normalization
+  const range = max - min;
+
+  for (let i = 0; i < data.length; i += 4) {
+    // Convert to grayscale
+    const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+
+    // Min-max normalization: stretch [min, max] to [0, 255]
+    const normalized = range > 0 ? ((gray - min) / range) * 255 : gray;
+
+    // Apply to all RGB channels
+    data[i] = normalized;
+    data[i + 1] = normalized;
+    data[i + 2] = normalized;
+    // Alpha channel stays the same
+  }
+
+  // Put the processed data back
+  ctx.putImageData(imgData, 0, 0);
 }
 
 export function applyModeToCanvas(mode, originalCanvas) {

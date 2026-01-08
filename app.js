@@ -1,5 +1,5 @@
 import { canvasToPngFile, prepareImageForPdf } from "./imagePipeline.js";
-import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection } from "./tools.js";
+import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection } from "./tools.js";
 import { applyModeToCanvas } from "./imageColorModes.js";
 
 const fileInput = document.getElementById("fileInput");
@@ -8,6 +8,7 @@ const splitBtn = document.getElementById("splitBtn");
 const colorModeSelect = document.getElementById("colorMode");
 const deleteBtn = document.getElementById("deleteBtn");
 const removeShadingBtn = document.getElementById("removeShadingBtn");
+const enhanceContrastBtn = document.getElementById("enhanceContrastBtn");
 const undoBtn = document.getElementById("undoBtn");
 const redoBtn = document.getElementById("redoBtn");
 const saveBtn = document.getElementById("saveBtn");
@@ -191,6 +192,13 @@ function pushRotateHistory(pageIds) {
 function pushRemoveShadingHistory(pageIds) {
   const affectedPages = pages.filter(p => pageIds.includes(p.id));
   pushHistory("removeShading", {
+    pages: affectedPages.map(createPageSnapshot),
+  });
+}
+
+function pushEnhanceContrastHistory(pageIds) {
+  const affectedPages = pages.filter(p => pageIds.includes(p.id));
+  pushHistory("enhanceContrast", {
     pages: affectedPages.map(createPageSnapshot),
   });
 }
@@ -688,6 +696,21 @@ removeShadingBtn.addEventListener("click", async () => {
   setStatus("Shading removal complete.");
 });
 
+enhanceContrastBtn.addEventListener("click", async () => {
+  const selected = getSelectedPages();
+  if (selected.length === 0) return;
+  pushEnhanceContrastHistory(selected.map(p => p.id));
+  progressLock = true;
+  progressFloor = 0;
+  setProgress(0, selected.length);
+  setStatus(`Enhancing contrast for ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
+  await enhanceContrastSelection({ pages, setProgress, setStatus, yieldToUi });
+  progressLock = false;
+  renderPages();
+  endProgress();
+  setStatus("Contrast enhancement complete.");
+});
+
 selectAllToggle.addEventListener("change", () => {
   const checked = selectAllToggle.checked;
   pages.forEach((page) => {
@@ -734,6 +757,14 @@ function createInverseSnapshot(snapshot) {
       const currentPages = pages.filter(p => pageIds.includes(p.id));
       return {
         type: "removeShading",
+        data: { pages: currentPages.map(createPageSnapshot) },
+      };
+    }
+    case "enhanceContrast": {
+      const pageIds = snapshot.data.pages.map(p => p.id);
+      const currentPages = pages.filter(p => pageIds.includes(p.id));
+      return {
+        type: "enhanceContrast",
         data: { pages: currentPages.map(createPageSnapshot) },
       };
     }
@@ -827,6 +858,16 @@ function applySnapshot(snapshot) {
       break;
     }
     case "removeShading": {
+      const snapshotPages = snapshot.data.pages;
+      snapshotPages.forEach(snap => {
+        const pageIndex = pages.findIndex(p => p.id === snap.id);
+        if (pageIndex !== -1) {
+          pages[pageIndex] = restorePage(snap);
+        }
+      });
+      break;
+    }
+    case "enhanceContrast": {
       const snapshotPages = snapshot.data.pages;
       snapshotPages.forEach(snap => {
         const pageIndex = pages.findIndex(p => p.id === snap.id);

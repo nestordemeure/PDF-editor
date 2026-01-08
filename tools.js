@@ -1,4 +1,4 @@
-import { applyModeToCanvas, removeShading } from "./imageColorModes.js";
+import { applyModeToCanvas, removeShading, enhanceContrast } from "./imageColorModes.js";
 
 function rotateCanvas(canvas, clockwise = true) {
   const rotated = document.createElement("canvas");
@@ -116,6 +116,19 @@ export async function removeShadingSelection({ pages, setProgress, setStatus, yi
     removeShading(page.originalCanvas);
     setProgress(i + 1, selected.length);
     setStatus(`Removing shading ${i + 1}/${selected.length}`);
+    await yieldToUi();
+  }
+}
+
+export async function enhanceContrastSelection({ pages, setProgress, setStatus, yieldToUi }) {
+  const selected = pages.filter((page) => page.selected);
+  for (let i = 0; i < selected.length; i += 1) {
+    const page = selected[i];
+    // Apply contrast enhancement to both canvas and originalCanvas
+    enhanceContrast(page.canvas);
+    enhanceContrast(page.originalCanvas);
+    setProgress(i + 1, selected.length);
+    setStatus(`Enhancing contrast ${i + 1}/${selected.length}`);
     await yieldToUi();
   }
 }
