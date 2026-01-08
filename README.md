@@ -4,8 +4,8 @@ Minimal, in-browser PDF cleanup tool for scanned books.
 
 ## Usage
 
-- For local testing (avoids CORS issues), run `./serve.sh` and open http://localhost:8000.
-- Or open the GitHub Pages version: https://nestordemeure.github.io/PDF-editor/
+- For local testing (avoids CORS issues), run `./serve.sh` and open <http://localhost:8000>.
+- Or open the GitHub Pages version: <https://nestordemeure.github.io/PDF-editor/>
 - Load one or more PDFs.
 - Select pages, then rotate, split, delete, or toggle B/W.
 - Drag thumbnails to reorder.
@@ -30,7 +30,6 @@ cp -R node_modules/scribe.js-ocr/mupdf vendor/mupdf
 
 ## TODO
 
-Functionalities:
 * sometimes pdfs are not scans but rather produced with Words, etc. how do we deal with that?
 * memorize OCR so that it is not redone if we resave a document with no modification to pages?
 * remove undo/redo to speed things up?
