@@ -1,13 +1,16 @@
 <!doctype html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>PDF Editor</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📝</text></svg>" />
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📝</text></svg>" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
+
 <body>
   <section class="section">
     <div class="container">
@@ -85,18 +88,18 @@
               <button id="rotateBtn" class="button is-small is-fullwidth is-light">Rotate 90°</button>
               <button id="splitBtn" class="button is-small is-fullwidth is-light">Split Double Pages</button>
               <button id="deleteBtn" class="button is-small is-fullwidth is-light">Delete Pages</button>
-              <button id="removeShadingBtn" class="button is-small is-fullwidth is-light">Remove Shading</button>
+              <button id="removeShadingBtn" class="button is-small is-fullwidth is-light">Remove Shadows</button>
 
               <div class="field mt-2">
                 <div class="select is-small is-fullwidth is-light">
                   <select id="colorMode">
-                <option value="color">Original Colors</option>
-                <option value="gray" selected>Grayscale</option>
-                <option value="bw-otsu">B&amp;W (flat)</option>
-                <option value="bw">B&amp;W (adaptive)</option>
-              </select>
-            </div>
-          </div>
+                    <option value="color">Original Colors</option>
+                    <option value="gray" selected>Grayscale</option>
+                    <option value="bw-otsu">B&amp;W (flat)</option>
+                    <option value="bw">B&amp;W (adaptive)</option>
+                  </select>
+                </div>
+              </div>
 
               <hr class="my-3" />
 
@@ -148,4 +151,5 @@
   <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady()"></script>
   <script type="module" src="app.js"></script>
 </body>
+
 </html>
