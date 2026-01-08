@@ -55,6 +55,56 @@ function cloneCanvas(source) {
   return copy;
 }
 
+// High-pass filter to remove low-frequency shading (scanner shadows, page curvature)
+export function removeShading(canvas, blurRadius = 20, strength = 1.2) {
+  const ctx = getCanvasContext(canvas, true);
+  const width = canvas.width;
+  const height = canvas.height;
+
+  // Get original image data
+  const originalData = ctx.getImageData(0, 0, width, height);
+
+  // Create temporary canvas for blurred version (low frequencies)
+  const tempCanvas = document.createElement("canvas");
+  tempCanvas.width = width;
+  tempCanvas.height = height;
+  const tempCtx = tempCanvas.getContext("2d");
+
+  // Draw blurred version to capture low-frequency components (shading)
+  tempCtx.filter = `blur(${blurRadius}px)`;
+  tempCtx.drawImage(canvas, 0, 0);
+
+  // Get blurred image data
+  const blurredData = tempCtx.getImageData(0, 0, width, height);
+
+  // Subtract low frequencies from original (high-pass filter)
+  const result = originalData;
+
+  // Apply high-pass filter: add details back to white background
+  for (let i = 0; i < result.data.length; i += 4) {
+    // Convert to grayscale
+    let grayOriginal = 0.299 * originalData.data[i] + 0.587 * originalData.data[i + 1] + 0.114 * originalData.data[i + 2];
+    let grayBlurred = 0.299 * blurredData.data[i] + 0.587 * blurredData.data[i + 1] + 0.114 * blurredData.data[i + 2];
+
+    // High-pass filter: get the details (original - blurred)
+    const diff = (grayOriginal - grayBlurred) * strength;
+
+    // Add details to white background (255 + diff)
+    // Background (diff≈0) becomes white (255)
+    // Text (diff<0) becomes darker than white
+    const value = Math.max(0, Math.min(255, 255 + diff));
+
+    // Apply to all RGB channels
+    result.data[i] = value;
+    result.data[i + 1] = value;
+    result.data[i + 2] = value;
+    // Alpha channel stays the same
+  }
+
+  // Put the processed data back
+  ctx.putImageData(result, 0, 0);
+}
+
 export function applyModeToCanvas(mode, originalCanvas) {
   const copy = cloneCanvas(originalCanvas);
   if (mode === "gray") {

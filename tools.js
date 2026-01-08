@@ -1,4 +1,4 @@
-import { applyModeToCanvas } from "./imageColorModes.js";
+import { applyModeToCanvas, removeShading } from "./imageColorModes.js";
 
 function rotateCanvas(canvas, clockwise = true) {
   const rotated = document.createElement("canvas");
@@ -105,4 +105,17 @@ export async function deleteSelection({ pages, setProgress, setStatus, yieldToUi
     await yieldToUi();
   }
   return nextPages;
+}
+
+export async function removeShadingSelection({ pages, setProgress, setStatus, yieldToUi }) {
+  const selected = pages.filter((page) => page.selected);
+  for (let i = 0; i < selected.length; i += 1) {
+    const page = selected[i];
+    // Apply high-pass filter to both canvas and originalCanvas
+    removeShading(page.canvas);
+    removeShading(page.originalCanvas);
+    setProgress(i + 1, selected.length);
+    setStatus(`Removing shading ${i + 1}/${selected.length}`);
+    await yieldToUi();
+  }
 }
