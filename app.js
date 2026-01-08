@@ -9,6 +9,7 @@ const deleteBtn = document.getElementById("deleteBtn");
 const undoBtn = document.getElementById("undoBtn");
 const redoBtn = document.getElementById("redoBtn");
 const saveBtn = document.getElementById("saveBtn");
+const recompressToggle = document.getElementById("recompressToggle");
 const selectAllToggle = document.getElementById("selectAll");
 const pageGrid = document.getElementById("pageGrid");
 const pageCount = document.getElementById("pageCount");
@@ -968,15 +969,17 @@ saveBtn.addEventListener("click", async () => {
     }
   }
 
-  setStatus("Optimizing PDF streams for size...");
-  setProgress(0, 1);
-  pdfBytes = rebuildXrefAndTrailer(
-    await recompressPdfBytesWithPako(pdfBytes, {
-      onProgress: setProgress,
-      onStatus: setStatus,
-      yieldToUi,
-    })
-  );
+  if (recompressToggle?.checked) {
+    setStatus("Optimizing PDF streams for size...");
+    setProgress(0, 1);
+    pdfBytes = rebuildXrefAndTrailer(
+      await recompressPdfBytesWithPako(pdfBytes, {
+        onProgress: setProgress,
+        onStatus: setStatus,
+        yieldToUi,
+      })
+    );
+  }
   const blob = new Blob([pdfBytes], { type: "application/pdf" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
