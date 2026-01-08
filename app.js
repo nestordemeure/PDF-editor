@@ -440,7 +440,7 @@ function encodeAscii(text) {
   return new TextEncoder().encode(text);
 }
 
-function recompressPdfBytesWithPako(pdfBytes, { onProgress, onStatus } = {}) {
+async function recompressPdfBytesWithPako(pdfBytes, { onProgress, onStatus, yieldToUi } = {}) {
   if (!window.pako || !pdfBytes) return pdfBytes;
   const bytes = pdfBytes instanceof Uint8Array ? pdfBytes : new Uint8Array(pdfBytes);
   const decoder = new TextDecoder("iso-8859-1");
@@ -449,6 +449,10 @@ function recompressPdfBytesWithPako(pdfBytes, { onProgress, onStatus } = {}) {
   let cursor = 0;
   let streamsRecompressed = 0;
   let streamsTotal = 0;
+  let skippedNonZlib = 0;
+  let skippedInflate = 0;
+  let rawDeflateUsed = 0;
+  const yieldEvery = 10;
 
   const streamToken = "stream";
   const endstreamToken = "endstream";
@@ -485,54 +489,90 @@ function recompressPdfBytesWithPako(pdfBytes, { onProgress, onStatus } = {}) {
     return dictText.replace(/\/Length\s+\d+\b/, `/Length ${nextLength}`);
   }
 
+  function looksLikeZlibHeader(buffer) {
+    if (!buffer || buffer.length < 2) return false;
+    const cmf = buffer[0];
+    const flg = buffer[1];
+    if ((cmf & 0x0f) !== 8) return false;
+    return ((cmf << 8) + flg) % 31 === 0;
+  }
+
+  function collectStreamEntries() {
+    const entries = [];
+    const regex = />>\s*stream[\r\n]/g;
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      const dictEnd = match.index + 2;
+      const dictStart = text.lastIndexOf("<<", match.index);
+      if (dictStart < 0 || dictEnd <= dictStart) continue;
+      const streamIndex = match.index + match[0].lastIndexOf(streamToken);
+      const dataStart = findStreamDataStart(streamIndex);
+      if (!Number.isFinite(dataStart) || dataStart <= streamIndex) continue;
+      entries.push({ dictStart, dictEnd, streamIndex, dataStart });
+    }
+    return entries;
+  }
+
+  const streamEntries = collectStreamEntries();
+
+  let predictorStreams = 0;
+  let predictorBytes = 0;
   // Count eligible streams first for progress reporting.
   {
-    let scanIndex = 0;
-    while (true) {
-      const streamIndex = text.indexOf(streamToken, scanIndex);
-      if (streamIndex === -1) break;
-      scanIndex = streamIndex + streamToken.length;
-      const dictEnd = text.lastIndexOf(">>", streamIndex);
-      const dictStart = text.lastIndexOf("<<", dictEnd);
-      if (dictStart < 0 || dictEnd < 0) continue;
+    for (const entry of streamEntries) {
+      const { dictStart, dictEnd } = entry;
       const dictText = text.slice(dictStart + 2, dictEnd);
-      if (!isOnlyFlate(dictText) || hasPredictor(dictText)) continue;
       const length = parseLength(dictText);
       if (!Number.isFinite(length)) continue;
+      if (isOnlyFlate(dictText) && hasPredictor(dictText)) {
+        predictorStreams += 1;
+        predictorBytes += length;
+        continue;
+      }
+      if (!isOnlyFlate(dictText) || hasPredictor(dictText)) continue;
       streamsTotal += 1;
     }
   }
 
+  if (predictorStreams > 0) {
+    console.info(
+      `PDF recompress: skipped ${predictorStreams} predictor stream${predictorStreams === 1 ? "" : "s"} ` +
+        `(${(predictorBytes / 1024).toFixed(1)} KB).`
+    );
+  }
+  console.info(`PDF recompress: ${streamsTotal} eligible Flate stream${streamsTotal === 1 ? "" : "s"}.`);
   if (streamsTotal > 0 && onStatus) onStatus(`Optimizing ${streamsTotal} PDF stream${streamsTotal === 1 ? "" : "s"}...`);
   if (streamsTotal > 0 && onProgress) onProgress(0, streamsTotal);
 
-  let searchIndex = 0;
-  while (true) {
-    const streamIndex = text.indexOf(streamToken, searchIndex);
-    if (streamIndex === -1) break;
-    searchIndex = streamIndex + streamToken.length;
-
-    const dictEnd = text.lastIndexOf(">>", streamIndex);
-    const dictStart = text.lastIndexOf("<<", dictEnd);
-    if (dictStart < 0 || dictEnd < 0) continue;
+  for (const entry of streamEntries) {
+    const { dictStart, dictEnd, dataStart } = entry;
     const dictText = text.slice(dictStart + 2, dictEnd);
     if (!isOnlyFlate(dictText) || hasPredictor(dictText)) continue;
     const length = parseLength(dictText);
     if (!Number.isFinite(length)) continue;
 
-    const dataStart = findStreamDataStart(streamIndex);
     const dataEnd = dataStart + length;
     if (dataEnd > bytes.length) continue;
     const endstreamIndex = text.indexOf(endstreamToken, dataEnd);
-    if (endstreamIndex === -1) continue;
+    if (endstreamIndex === -1 || endstreamIndex - dataEnd > 2) continue;
 
     const originalData = bytes.subarray(dataStart, dataEnd);
     let inflated;
-    try {
-      inflated = window.pako.inflate(originalData);
-    } catch (error) {
-      console.warn("Skipping stream recompression (inflate failed).", error);
-      continue;
+    if (looksLikeZlibHeader(originalData)) {
+      try {
+        inflated = window.pako.inflate(originalData);
+      } catch (error) {
+        skippedInflate += 1;
+        continue;
+      }
+    } else {
+      try {
+        inflated = window.pako.inflateRaw(originalData);
+        rawDeflateUsed += 1;
+      } catch (error) {
+        skippedNonZlib += 1;
+        continue;
+      }
     }
     const recompressed = window.pako.deflate(inflated, { level: 9 });
     const nextDictText = replaceLength(dictText, recompressed.length);
@@ -546,10 +586,31 @@ function recompressPdfBytesWithPako(pdfBytes, { onProgress, onStatus } = {}) {
     cursor = endstreamIndex + endstreamToken.length;
     streamsRecompressed += 1;
     if (onProgress) onProgress(streamsRecompressed, streamsTotal || streamsRecompressed);
+    if (yieldToUi && streamsRecompressed % yieldEvery === 0) {
+      await yieldToUi();
+    }
   }
 
   if (streamsRecompressed === 0) return bytes;
   parts.push(bytes.subarray(cursor));
+  if (skippedNonZlib > 0) {
+    console.info(
+      `PDF recompress: skipped ${skippedNonZlib} stream${skippedNonZlib === 1 ? "" : "s"} ` +
+        "without a valid zlib header."
+    );
+  }
+  if (skippedInflate > 0) {
+    console.info(
+      `PDF recompress: skipped ${skippedInflate} stream${skippedInflate === 1 ? "" : "s"} ` +
+        "that failed to inflate."
+    );
+  }
+  if (rawDeflateUsed > 0) {
+    console.info(
+      `PDF recompress: ${rawDeflateUsed} stream${rawDeflateUsed === 1 ? "" : "s"} ` +
+        "inflated using raw deflate fallback."
+    );
+  }
   return concatUint8Arrays(parts);
 }
 
@@ -910,9 +971,10 @@ saveBtn.addEventListener("click", async () => {
   setStatus("Optimizing PDF streams for size...");
   setProgress(0, 1);
   pdfBytes = rebuildXrefAndTrailer(
-    recompressPdfBytesWithPako(pdfBytes, {
+    await recompressPdfBytesWithPako(pdfBytes, {
       onProgress: setProgress,
       onStatus: setStatus,
+      yieldToUi,
     })
   );
   const blob = new Blob([pdfBytes], { type: "application/pdf" });
