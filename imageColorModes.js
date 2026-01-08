@@ -80,7 +80,8 @@ export function removeShading(canvas, blurRadius = 20, strength = 1.2) {
   // Subtract low frequencies from original (high-pass filter)
   const result = originalData;
 
-  // Apply high-pass filter: add details back to white background
+  // Step 1: Apply high-pass filter and collect all pixel values
+  const values = [];
   for (let i = 0; i < result.data.length; i += 4) {
     // Convert to grayscale
     let grayOriginal = 0.299 * originalData.data[i] + 0.587 * originalData.data[i + 1] + 0.114 * originalData.data[i + 2];
@@ -93,11 +94,30 @@ export function removeShading(canvas, blurRadius = 20, strength = 1.2) {
     // Background (diff≈0) becomes white (255)
     // Text (diff<0) becomes darker than white
     const value = Math.max(0, Math.min(255, 255 + diff));
+    values.push(value);
+  }
+
+  // Step 2: Find min and max to determine the spectrum range
+  const sorted = [...values].sort((a, b) => a - b);
+  const min = sorted[0];  // darkest pixel
+  const max = sorted[sorted.length - 1];  // whitest pixel
+  const thirdOfRange = min + (max - min) / 3;  // bottom third of spectrum
+  const bottomThirdSize = thirdOfRange - min;  // size of bottom third
+
+  // Step 3: Apply normalized values - translate bottom third, scale rest to fit
+  let valueIndex = 0;
+  for (let i = 0; i < result.data.length; i += 4) {
+    const value = values[valueIndex++];
+
+    // Normalize: bottom third translated (subtract min), top two-thirds scaled to fill remaining range
+    const normalized = value <= thirdOfRange
+      ? value - min
+      : bottomThirdSize + ((value - thirdOfRange) / (max - thirdOfRange)) * (255 - bottomThirdSize);
 
     // Apply to all RGB channels
-    result.data[i] = value;
-    result.data[i + 1] = value;
-    result.data[i + 2] = value;
+    result.data[i] = normalized;
+    result.data[i + 1] = normalized;
+    result.data[i + 2] = normalized;
     // Alpha channel stays the same
   }
 
