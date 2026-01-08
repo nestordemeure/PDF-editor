@@ -32,6 +32,7 @@ let activePreviewId = null;
 let scribeModule = null;
 let progressFloor = 0;
 let progressLock = false;
+const sourceFileNames = new Set();
 window.cvReady = false;
 window.onOpenCvReady = () => {
   if (!window.cv) return;
@@ -50,6 +51,61 @@ function yieldToUi() {
 
 function setStatus(message) {
   statusText.textContent = message;
+}
+
+function getFileStem(filename) {
+  if (!filename) return "file";
+  const lastDot = filename.lastIndexOf(".");
+  return lastDot > 0 ? filename.slice(0, lastDot) : filename;
+}
+
+function sanitizeFilenamePart(value, maxLength = 40) {
+  const cleaned = (value || "")
+    .replace(/[/\\?%*:|"<>]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_.]+|[-_.]+$/g, "")
+    .slice(0, maxLength);
+  return cleaned || "file";
+}
+
+function compressionLabel(value) {
+  if (value === "none") return "";
+  if (value === "low") return "lowcomp";
+  if (value === "medium") return "medcomp";
+  if (value === "high") return "highcomp";
+  return "medcomp";
+}
+
+function modeLabel(mode) {
+  if (mode === "bw") return "bwprog";
+  if (mode === "bw-otsu") return "bw";
+  if (mode === "gray4") return "gray4";
+  if (mode === "gray") return "gray8";
+  if (mode === "gray-jpeg") return "grayjpg";
+  return "";
+}
+
+function mostCommonModeLabel() {
+  if (pages.length === 0) return "color";
+  const counts = { "": 0, gray4: 0, gray8: 0, grayjpg: 0, bw: 0, bwprog: 0 };
+  for (const page of pages) {
+    const label = modeLabel(page.mode);
+    counts[label] = (counts[label] || 0) + 1;
+  }
+  let best = "";
+  for (const label of ["gray4", "gray8", "grayjpg", "bw", "bwprog", ""]) {
+    if (counts[label] > (counts[best] || 0)) best = label;
+  }
+  return best;
+}
+
+function buildOutputFilename({ compression, ocrUsed }) {
+  const baseName = sourceFileNames.size === 1 ? Array.from(sourceFileNames)[0] : "merged";
+  const parts = [baseName, compressionLabel(compression), mostCommonModeLabel(), ocrUsed ? "ocr" : ""]
+    .filter(Boolean)
+    .map((part) => sanitizeFilenamePart(part, 24));
+  return `${parts.join("_")}.pdf`;
 }
 
 function setProgress(value, max) {
@@ -464,6 +520,8 @@ async function handleFiles(files) {
   const loaded = [];
   for (const file of files) {
     if (file.type !== "application/pdf") continue;
+    const baseName = sanitizeFilenamePart(getFileStem(file.name));
+    if (baseName) sourceFileNames.add(baseName);
     const newPages = await renderPdfToPages(file);
     loaded.push(...newPages);
   }
@@ -596,6 +654,7 @@ saveBtn.addEventListener("click", async () => {
   const compression = compressionLevel.value;
   const quality = compression === "low" ? 0.95 : compression === "medium" ? 0.85 : compression === "high" ? 0.70 : 0.85;
   let pdfBytes = await buildPdfBytes({ compression, quality });
+  let ocrUsed = false;
 
   if (ocrLang.value !== "none") {
     try {
@@ -603,6 +662,7 @@ saveBtn.addEventListener("click", async () => {
       setProgress(0, 0);
       const textPdfBytes = await runOcrAndCreateTextPdf();
       if (textPdfBytes) {
+        ocrUsed = true;
         const textDoc = await PDFDocument.load(textPdfBytes);
         const pageCount = Math.min(textDoc.getPageCount(), pages.length);
         for (let i = 0; i < pageCount; i += 1) {
@@ -637,13 +697,14 @@ saveBtn.addEventListener("click", async () => {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = "edited.pdf";
+  const outputName = buildOutputFilename({ compression, ocrUsed });
+  link.download = outputName;
   document.body.appendChild(link);
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
   endProgress();
-  setStatus("Saved edited.pdf");
+  setStatus(`Saved ${outputName}`);
 });
 
 setStatus("Load one or more PDFs to begin.");
