@@ -134,17 +134,32 @@ function updatePageCount() {
   pageCount.textContent = `${pages.length} page${pages.length === 1 ? "" : "s"}`;
 }
 
-function pushHistory() {
-  const snapshot = pages.map((page) => ({
-    id: page.id,
-    rotation: page.rotation,
-    mode: page.mode,
-    dataUrl: page.canvas.toDataURL("image/png"),
-    originalDataUrl: page.originalCanvas.toDataURL("image/png"),
-    width: page.canvas.width,
-    height: page.canvas.height,
-    pageSizePts: { width: page.pageSizePts.width, height: page.pageSizePts.height },
-  }));
+async function pushHistory({ label = "Saving undo snapshot", showProgress = true } = {}) {
+  const snapshot = [];
+  const total = pages.length;
+  if (showProgress && total > 0) {
+    setProgress(0, total);
+    setStatus(`${label} 0/${total}`);
+    await yieldToUi();
+  }
+  for (let i = 0; i < total; i += 1) {
+    const page = pages[i];
+    snapshot.push({
+      id: page.id,
+      rotation: page.rotation,
+      mode: page.mode,
+      dataUrl: page.canvas.toDataURL("image/png"),
+      originalDataUrl: page.originalCanvas.toDataURL("image/png"),
+      width: page.canvas.width,
+      height: page.canvas.height,
+      pageSizePts: { width: page.pageSizePts.width, height: page.pageSizePts.height },
+    });
+    if (showProgress) {
+      setProgress(i + 1, total);
+      setStatus(`${label} ${i + 1}/${total}`);
+      await yieldToUi();
+    }
+  }
   history.push(snapshot);
   if (history.length > 50) {
     history.shift();
@@ -362,9 +377,9 @@ function setupSortable() {
     onStart: (evt) => {
       evt.item.classList.add("dragging");
     },
-    onEnd: (evt) => {
+    onEnd: async (evt) => {
       evt.item.classList.remove("dragging");
-      pushHistory();
+      await pushHistory({ showProgress: false });
       const order = Array.from(pageGrid.children).map((child) => child.dataset.pageId);
       pages.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
       renderPages();
@@ -412,9 +427,11 @@ async function normalizePdfBytes(result) {
 async function buildPdfBytes({ compression, quality = 0.85 } = {}) {
   const pdfDoc = await PDFDocument.create();
   let index = 0;
+  const totalSteps = pages.length + 1;
+  setProgress(0, totalSteps);
   for (const page of pages) {
     index += 1;
-    setProgress(index, pages.length);
+    setProgress(index, totalSteps);
     setStatus(`Saving PDF... ${index}/${pages.length}`);
     const { bytes, useJpeg } = await prepareImageForPdf({ page, compression, quality });
     const image = useJpeg ? await pdfDoc.embedJpg(bytes) : await pdfDoc.embedPng(bytes);
@@ -427,6 +444,9 @@ async function buildPdfBytes({ compression, quality = 0.85 } = {}) {
     });
     await yieldToUi();
   }
+  setStatus("Finalizing PDF...");
+  setProgress(totalSteps, totalSteps);
+  await yieldToUi();
   return pdfDoc.save();
 }
 
@@ -515,7 +535,7 @@ async function renderPdfToPages(file) {
 
 async function handleFiles(files) {
   if (!files.length) return;
-  pushHistory();
+  await pushHistory({ showProgress: false });
   setStatus("Loading PDFs...");
   const loaded = [];
   for (const file of files) {
@@ -535,75 +555,71 @@ fileInput.addEventListener("change", (event) => {
   event.target.value = "";
 });
 
-rotateBtn.addEventListener("click", () => {
+rotateBtn.addEventListener("click", async () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
-  pushHistory();
   progressLock = true;
+  progressFloor = 0;
+  await pushHistory();
   progressFloor = 0;
   setProgress(0, selected.length);
   setStatus(`Rotating ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
-  (async () => {
-    await rotateSelection({ pages, setProgress, setStatus, yieldToUi });
-    progressLock = false;
-    renderPages();
-    endProgress();
-    setStatus("Rotation complete.");
-  })();
+  await rotateSelection({ pages, setProgress, setStatus, yieldToUi });
+  progressLock = false;
+  renderPages();
+  endProgress();
+  setStatus("Rotation complete.");
 });
 
-colorModeSelect.addEventListener("change", () => {
+colorModeSelect.addEventListener("change", async () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
   const mode = colorModeSelect.value;
-  pushHistory();
   progressLock = true;
+  progressFloor = 0;
+  await pushHistory();
   progressFloor = 0;
   setProgress(0, selected.length);
   setStatus(`Applying color mode to ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
-  (async () => {
-    await applyColorModeToSelection({ pages, mode, setProgress, setStatus, yieldToUi });
-    progressLock = false;
-    renderPages();
-    endProgress();
-    setStatus("Color mode updated.");
-  })();
+  await applyColorModeToSelection({ pages, mode, setProgress, setStatus, yieldToUi });
+  progressLock = false;
+  renderPages();
+  endProgress();
+  setStatus("Color mode updated.");
 });
 
-splitBtn.addEventListener("click", () => {
+splitBtn.addEventListener("click", async () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
-  pushHistory();
   progressLock = true;
+  progressFloor = 0;
+  await pushHistory();
   progressFloor = 0;
   setProgress(0, pages.length);
   setStatus(`Splitting pages...`);
-  (async () => {
-    const nextPages = await splitSelection({ pages, setProgress, setStatus, yieldToUi });
-    progressLock = false;
-    pages = nextPages;
-    renderPages();
-    endProgress();
-    setStatus("Split complete.");
-  })();
+  const nextPages = await splitSelection({ pages, setProgress, setStatus, yieldToUi });
+  progressLock = false;
+  pages = nextPages;
+  renderPages();
+  endProgress();
+  setStatus("Split complete.");
 });
 
-deleteBtn.addEventListener("click", () => {
+deleteBtn.addEventListener("click", async () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
-  pushHistory();
   progressLock = true;
+  progressFloor = 0;
+  await pushHistory();
   progressFloor = 0;
   setProgress(0, pages.length);
   setStatus(`Deleting ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
-  (async () => {
-    const nextPages = await deleteSelection({ pages, setProgress, setStatus, yieldToUi });
-    progressLock = false;
-    pages = nextPages;
-    renderPages();
-    endProgress();
-    setStatus("Delete complete.");
-  })();
+  const nextPages = await deleteSelection({ pages, setProgress, setStatus, yieldToUi });
+  progressLock = false;
+  pages = nextPages;
+  renderPages();
+  endProgress();
+  setStatus("Delete complete.");
 });
 
 selectAllToggle.addEventListener("change", () => {
@@ -680,6 +696,9 @@ saveBtn.addEventListener("click", async () => {
           });
           await yieldToUi();
         }
+        setStatus("Finalizing PDF...");
+        setProgress(pageCount, pageCount);
+        await yieldToUi();
         pdfBytes = await textDoc.save();
         setStatus("OCR complete. Saving searchable PDF...");
       } else {

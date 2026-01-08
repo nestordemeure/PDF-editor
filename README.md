@@ -31,7 +31,6 @@ cp -R node_modules/scribe.js-ocr/mupdf vendor/mupdf
 ## TODO
 
 Functionalities:
-* sometimes pdfs are not scans but rather produced with Words, etc. how do we deal with that: do we convert them into images?
-* clicking on a tool (ie changing all images to b&W) causes a freeze then a very fast progress bar then done. why freeze? we should hand the thread instantly
-* memorize OCR so that i is not redone if we resave a document with no modification to pages?
-* look into what ocrmypdf does for compressoin
+* sometimes pdfs are not scans but rather produced with Words, etc. how do we deal with that?
+* memorize OCR so that it is not redone if we resave a document with no modification to pages?
+* look into what ocrmypdf does for compression
