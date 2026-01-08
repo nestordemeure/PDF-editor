@@ -33,3 +33,4 @@ cp -R node_modules/scribe.js-ocr/mupdf vendor/mupdf
 Functionalities:
 * sometimes pdfs are not scans but rather produced with Words, etc. how do we deal with that?
 * memorize OCR so that it is not redone if we resave a document with no modification to pages?
+* tweak jpeg chroma for better text redeability?

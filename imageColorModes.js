@@ -59,10 +59,6 @@ export function applyModeToCanvas(mode, originalCanvas) {
   const copy = cloneCanvas(originalCanvas);
   if (mode === "gray") {
     applyGrayscale(copy);
-  } else if (mode === "gray4") {
-    applyPosterize(copy, 16);
-  } else if (mode === "gray-jpeg") {
-    applyGrayscale(copy);
   } else if (mode === "bw") {
     const usedOpenCv = binarizeCanvasAdaptive(copy);
     if (!usedOpenCv) {

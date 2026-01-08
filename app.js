@@ -81,21 +81,19 @@ function compressionLabel(value) {
 function modeLabel(mode) {
   if (mode === "bw") return "bwprog";
   if (mode === "bw-otsu") return "bw";
-  if (mode === "gray4") return "gray4";
-  if (mode === "gray") return "gray8";
-  if (mode === "gray-jpeg") return "grayjpg";
+  if (mode === "gray") return "gray";
   return "";
 }
 
 function mostCommonModeLabel() {
   if (pages.length === 0) return "color";
-  const counts = { "": 0, gray4: 0, gray8: 0, grayjpg: 0, bw: 0, bwprog: 0 };
+  const counts = { "": 0, gray: 0, bw: 0, bwprog: 0 };
   for (const page of pages) {
     const label = modeLabel(page.mode);
     counts[label] = (counts[label] || 0) + 1;
   }
   let best = "";
-  for (const label of ["gray4", "gray8", "grayjpg", "bw", "bwprog", ""]) {
+  for (const label of ["gray", "bw", "bwprog", ""]) {
     if (counts[label] > (counts[best] || 0)) best = label;
   }
   return best;
@@ -925,7 +923,7 @@ saveBtn.addEventListener("click", async () => {
   if (pages.length === 0) return;
   setStatus("Saving PDF...");
   const compression = compressionLevel.value;
-  const quality = compression === "low" ? 0.95 : compression === "medium" ? 0.85 : compression === "high" ? 0.70 : 0.85;
+  const quality = compression === "low" ? 0.75 : compression === "medium" ? 0.60 : compression === "high" ? 0.50 : 0.85;
   let pdfBytes = await buildPdfBytes({ compression, quality });
   let ocrUsed = false;
 

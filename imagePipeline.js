@@ -4,7 +4,6 @@ const TARGET_DPI = {
   bw: { low: 260, medium: 200, high: 150 },
 };
 
-const GRAY_LEVELS = { low: 16, medium: 8, high: 4 };
 import { binarizeCanvasAdaptive, binarizeCanvasOtsu, isOpenCvReady } from "./imageBinarization.js";
 
 const BW_THRESHOLD = 160;
@@ -64,19 +63,6 @@ function makeScaledCanvas(source, width, height, { fillWhite = false, smooth = t
   return canvas;
 }
 
-function quantizeGrayscale(data, levels) {
-  const step = 255 / (levels - 1);
-  for (let i = 0; i < data.length; i += 4) {
-    const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-    const bucket = Math.round(gray / step) * step;
-    const value = Math.max(0, Math.min(255, bucket));
-    data[i] = value;
-    data[i + 1] = value;
-    data[i + 2] = value;
-    data[i + 3] = 255;
-  }
-}
-
 function quantizeBw(data) {
   for (let i = 0; i < data.length; i += 4) {
     const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
@@ -130,16 +116,29 @@ function encodeBwPng1Bit(canvas, mode) {
   return new Uint8Array(UPNG.encode([imgData.data.buffer], canvas.width, canvas.height, 0));
 }
 
-function encodePngFromCanvas(canvas, { levels = null, bw = false, mode = "bw" } = {}) {
+function convertToGreyscale(canvas) {
+  const ctx = canvas.getContext("2d");
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imgData.data;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+    data[i] = gray;
+    data[i + 1] = gray;
+    data[i + 2] = gray;
+    // data[i + 3] remains unchanged (alpha)
+  }
+
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function encodePngFromCanvas(canvas, { bw = false, mode = "bw" } = {}) {
   const ctx = canvas.getContext("2d");
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   if (bw) {
     return encodeBwPng1Bit(canvas, mode);
-  } else if (levels) {
-    quantizeGrayscale(imgData.data, levels);
   }
-  const cnum = bw ? 2 : levels || 0;
-  const encoded = UPNG.encode([imgData.data.buffer], canvas.width, canvas.height, cnum);
+  const encoded = UPNG.encode([imgData.data.buffer], canvas.width, canvas.height, 0);
   return new Uint8Array(encoded);
 }
 
@@ -166,7 +165,7 @@ export async function prepareImageForPdf({ page, compression, quality }) {
   const mode = page.mode;
   const compressionEnabled = compression !== "none";
   const useOriginal =
-    (!compressionEnabled && mode === "color") || (compressionEnabled && mode !== "color" && mode !== "bw" && mode !== "gray-jpeg");
+    (!compressionEnabled && mode === "color") || (compressionEnabled && mode !== "color" && mode !== "bw" && mode !== "gray");
   const sourceCanvas = mode === "bw" || mode === "bw-otsu" ? page.canvas : useOriginal ? page.originalCanvas : page.canvas;
 
   const outputDpi = getOutputDpi(page, mode, compression);
@@ -177,17 +176,13 @@ export async function prepareImageForPdf({ page, compression, quality }) {
     ? makeScaledCanvas(sourceCanvas, outputSize.width, outputSize.height, { fillWhite, smooth })
     : sourceCanvas;
 
-  if (compressionEnabled && mode === "gray-jpeg") {
-    return { bytes: await canvasToJpegBytes(workingCanvas, quality), useJpeg: true };
-  }
-
   if (compressionEnabled && mode === "color") {
     return { bytes: await canvasToJpegBytes(workingCanvas, quality), useJpeg: true };
   }
 
-  if (compressionEnabled && (mode === "gray" || mode === "gray4")) {
-    const levels = GRAY_LEVELS[compression] || GRAY_LEVELS.medium;
-    return { bytes: encodePngFromCanvas(workingCanvas, { levels }), useJpeg: false };
+  if (compressionEnabled && mode === "gray") {
+    convertToGreyscale(workingCanvas);
+    return { bytes: await canvasToJpegBytes(workingCanvas, quality), useJpeg: true };
   }
 
   if (mode === "bw" || mode === "bw-otsu") {
