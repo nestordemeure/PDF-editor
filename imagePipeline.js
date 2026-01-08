@@ -132,6 +132,18 @@ function convertToGreyscale(canvas) {
   ctx.putImageData(imgData, 0, 0);
 }
 
+function applySubtleBlur(canvas, blurRadius = 0.4) {
+  const temp = document.createElement("canvas");
+  temp.width = canvas.width;
+  temp.height = canvas.height;
+  const ctx = temp.getContext("2d");
+  ctx.filter = `blur(${blurRadius}px)`;
+  ctx.drawImage(canvas, 0, 0);
+
+  // Copy blurred result back to original canvas
+  canvas.getContext("2d").drawImage(temp, 0, 0);
+}
+
 function encodePngFromCanvas(canvas, { bw = false, mode = "bw" } = {}) {
   const ctx = canvas.getContext("2d");
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -182,6 +194,7 @@ export async function prepareImageForPdf({ page, compression, quality }) {
 
   if (compressionEnabled && mode === "gray") {
     convertToGreyscale(workingCanvas);
+    applySubtleBlur(workingCanvas, 0.4);
     return { bytes: await canvasToJpegBytes(workingCanvas, quality), useJpeg: true };
   }
 

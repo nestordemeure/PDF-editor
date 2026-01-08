@@ -1,5 +1,6 @@
 import { canvasToPngFile, prepareImageForPdf } from "./imagePipeline.js";
 import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection } from "./tools.js";
+import { applyModeToCanvas } from "./imageColorModes.js";
 
 const fileInput = document.getElementById("fileInput");
 const rotateBtn = document.getElementById("rotateBtn");
@@ -773,11 +774,12 @@ async function renderPdfToPages(file) {
     originalCanvas.width = canvas.width;
     originalCanvas.height = canvas.height;
     originalCanvas.getContext("2d").drawImage(canvas, 0, 0);
+    const processedCanvas = applyModeToCanvas("gray", originalCanvas);
     renderedPages.push({
       id: `p_${Date.now()}_${Math.random().toString(16).slice(2)}`,
       rotation: 0,
-      mode: "color",
-      canvas,
+      mode: "gray",
+      canvas: processedCanvas,
       originalCanvas,
       selected: false,
       pageSizePts: { width: baseViewport.width, height: baseViewport.height },
