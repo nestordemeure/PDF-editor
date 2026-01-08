@@ -134,32 +134,39 @@ function updatePageCount() {
   pageCount.textContent = `${pages.length} page${pages.length === 1 ? "" : "s"}`;
 }
 
-async function pushHistory({ label = "Saving undo snapshot", showProgress = true } = {}) {
-  const snapshot = [];
-  const total = pages.length;
-  if (showProgress && total > 0) {
-    setProgress(0, total);
-    setStatus(`${label} 0/${total}`);
-    await yieldToUi();
-  }
-  for (let i = 0; i < total; i += 1) {
-    const page = pages[i];
-    snapshot.push({
-      id: page.id,
-      rotation: page.rotation,
-      mode: page.mode,
-      dataUrl: page.canvas.toDataURL("image/png"),
-      originalDataUrl: page.originalCanvas.toDataURL("image/png"),
-      width: page.canvas.width,
-      height: page.canvas.height,
-      pageSizePts: { width: page.pageSizePts.width, height: page.pageSizePts.height },
-    });
-    if (showProgress) {
-      setProgress(i + 1, total);
-      setStatus(`${label} ${i + 1}/${total}`);
-      await yieldToUi();
-    }
-  }
+// Helper: Convert canvas to ImageData for efficient storage
+function canvasToImageData(canvas) {
+  const ctx = canvas.getContext("2d");
+  return ctx.getImageData(0, 0, canvas.width, canvas.height);
+}
+
+// Helper: Convert ImageData back to canvas
+function imageDataToCanvas(imageData, width, height) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+// Helper: Create a page snapshot with ImageData
+function createPageSnapshot(page) {
+  return {
+    id: page.id,
+    rotation: page.rotation,
+    mode: page.mode,
+    canvasData: canvasToImageData(page.canvas),
+    originalCanvasData: canvasToImageData(page.originalCanvas),
+    width: page.canvas.width,
+    height: page.canvas.height,
+    pageSizePts: { width: page.pageSizePts.width, height: page.pageSizePts.height },
+  };
+}
+
+// Smart history: Store only what's needed for each operation type
+function pushHistory(operationType, data) {
+  const snapshot = { type: operationType, data };
   history.push(snapshot);
   if (history.length > 50) {
     history.shift();
@@ -167,38 +174,64 @@ async function pushHistory({ label = "Saving undo snapshot", showProgress = true
   future = [];
 }
 
-async function restoreSnapshot(snapshot) {
-  const restored = [];
-  for (const item of snapshot) {
-    const canvas = await dataUrlToCanvas(item.dataUrl, item.width, item.height);
-    const originalCanvas = await dataUrlToCanvas(item.originalDataUrl, item.width, item.height);
-    restored.push({
-      id: item.id,
-      rotation: item.rotation,
-      mode: item.mode,
-      canvas,
-      originalCanvas,
-      selected: false,
-      pageSizePts: item.pageSizePts || { width: item.width, height: item.height },
-    });
-  }
-  pages = restored;
-  renderPages();
+// Operation-specific history functions
+function pushReorderHistory() {
+  pushHistory("reorder", {
+    pageOrder: pages.map(p => p.id),
+  });
 }
 
-function dataUrlToCanvas(dataUrl, width, height) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(img, 0, 0, width, height);
-      resolve(canvas);
-    };
-    img.src = dataUrl;
+function pushRotateHistory(pageIds) {
+  const affectedPages = pages.filter(p => pageIds.includes(p.id));
+  pushHistory("rotate", {
+    pages: affectedPages.map(createPageSnapshot),
   });
+}
+
+function pushColorModeHistory(pageIds) {
+  const affectedPages = pages.filter(p => pageIds.includes(p.id));
+  pushHistory("colorMode", {
+    pagesModes: affectedPages.map(p => ({ id: p.id, mode: p.mode })),
+  });
+}
+
+function pushSplitHistory(pageIds) {
+  const affectedPages = pages.filter(p => pageIds.includes(p.id));
+  pushHistory("split", {
+    pageOrder: pages.map(p => p.id),
+    originalPages: affectedPages.map(createPageSnapshot),
+  });
+}
+
+function pushDeleteHistory(pageIds) {
+  const deletedPages = pages.filter(p => pageIds.includes(p.id));
+  const deletedWithIndices = deletedPages.map(page => ({
+    index: pages.indexOf(page),
+    page: createPageSnapshot(page),
+  }));
+  // Store as "insertPages" because when we UNDO, we insert them back
+  pushHistory("insertPages", {
+    pagesToInsert: deletedWithIndices,
+  });
+}
+
+function pushLoadHistory(newPageCount) {
+  pushHistory("load", {
+    newPageIds: pages.slice(-newPageCount).map(p => p.id),
+  });
+}
+
+// Restore a page from a snapshot
+function restorePage(pageSnapshot) {
+  return {
+    id: pageSnapshot.id,
+    rotation: pageSnapshot.rotation,
+    mode: pageSnapshot.mode,
+    canvas: imageDataToCanvas(pageSnapshot.canvasData, pageSnapshot.width, pageSnapshot.height),
+    originalCanvas: imageDataToCanvas(pageSnapshot.originalCanvasData, pageSnapshot.width, pageSnapshot.height),
+    selected: false,
+    pageSizePts: pageSnapshot.pageSizePts,
+  };
 }
 
 function multiplyMatrix(a, b) {
@@ -377,9 +410,9 @@ function setupSortable() {
     onStart: (evt) => {
       evt.item.classList.add("dragging");
     },
-    onEnd: async (evt) => {
+    onEnd: (evt) => {
       evt.item.classList.remove("dragging");
-      await pushHistory({ showProgress: false });
+      pushReorderHistory();
       const order = Array.from(pageGrid.children).map((child) => child.dataset.pageId);
       pages.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
       renderPages();
@@ -792,7 +825,6 @@ async function renderPdfToPages(file) {
 
 async function handleFiles(files) {
   if (!files.length) return;
-  await pushHistory({ showProgress: false });
   setStatus("Loading PDFs...");
   const loaded = [];
   for (const file of files) {
@@ -803,6 +835,9 @@ async function handleFiles(files) {
     loaded.push(...newPages);
   }
   pages = pages.concat(loaded);
+  if (loaded.length > 0) {
+    pushLoadHistory(loaded.length);
+  }
   setStatus(`Loaded ${loaded.length} page${loaded.length === 1 ? "" : "s"}.`);
   renderPages();
 }
@@ -815,9 +850,8 @@ fileInput.addEventListener("change", (event) => {
 rotateBtn.addEventListener("click", async () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
+  pushRotateHistory(selected.map(p => p.id));
   progressLock = true;
-  progressFloor = 0;
-  await pushHistory();
   progressFloor = 0;
   setProgress(0, selected.length);
   setStatus(`Rotating ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
@@ -832,9 +866,8 @@ colorModeSelect.addEventListener("change", async () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
   const mode = colorModeSelect.value;
+  pushColorModeHistory(selected.map(p => p.id));
   progressLock = true;
-  progressFloor = 0;
-  await pushHistory();
   progressFloor = 0;
   setProgress(0, selected.length);
   setStatus(`Applying color mode to ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
@@ -848,9 +881,8 @@ colorModeSelect.addEventListener("change", async () => {
 splitBtn.addEventListener("click", async () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
+  pushSplitHistory(selected.map(p => p.id));
   progressLock = true;
-  progressFloor = 0;
-  await pushHistory();
   progressFloor = 0;
   setProgress(0, pages.length);
   setStatus(`Splitting pages...`);
@@ -865,9 +897,8 @@ splitBtn.addEventListener("click", async () => {
 deleteBtn.addEventListener("click", async () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
+  pushDeleteHistory(selected.map(p => p.id));
   progressLock = true;
-  progressFloor = 0;
-  await pushHistory();
   progressFloor = 0;
   setProgress(0, pages.length);
   setStatus(`Deleting ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
@@ -887,39 +918,188 @@ selectAllToggle.addEventListener("change", () => {
   renderPages();
 });
 
-undoBtn.addEventListener("click", async () => {
+undoBtn.addEventListener("click", () => {
   if (history.length === 0) return;
   const snapshot = history.pop();
-  const currentSnapshot = pages.map((page) => ({
-    id: page.id,
-    rotation: page.rotation,
-    mode: page.mode,
-    dataUrl: page.canvas.toDataURL("image/png"),
-    originalDataUrl: page.originalCanvas.toDataURL("image/png"),
-    width: page.canvas.width,
-    height: page.canvas.height,
-    pageSizePts: { width: page.pageSizePts.width, height: page.pageSizePts.height },
-  }));
-  future.push(currentSnapshot);
-  await restoreSnapshot(snapshot);
+  const inverseSnapshot = createInverseSnapshot(snapshot);
+  future.push(inverseSnapshot);
+  applySnapshot(snapshot);
 });
 
-redoBtn.addEventListener("click", async () => {
+redoBtn.addEventListener("click", () => {
   if (future.length === 0) return;
   const snapshot = future.pop();
-  const currentSnapshot = pages.map((page) => ({
-    id: page.id,
-    rotation: page.rotation,
-    mode: page.mode,
-    dataUrl: page.canvas.toDataURL("image/png"),
-    originalDataUrl: page.originalCanvas.toDataURL("image/png"),
-    width: page.canvas.width,
-    height: page.canvas.height,
-    pageSizePts: { width: page.pageSizePts.width, height: page.pageSizePts.height },
-  }));
-  history.push(currentSnapshot);
-  await restoreSnapshot(snapshot);
+  const inverseSnapshot = createInverseSnapshot(snapshot);
+  history.push(inverseSnapshot);
+  applySnapshot(snapshot);
 });
+
+// Create an inverse snapshot that can undo the given snapshot
+function createInverseSnapshot(snapshot) {
+  switch (snapshot.type) {
+    case "reorder": {
+      return {
+        type: "reorder",
+        data: { pageOrder: pages.map(p => p.id) },
+      };
+    }
+    case "rotate": {
+      const pageIds = snapshot.data.pages.map(p => p.id);
+      const currentPages = pages.filter(p => pageIds.includes(p.id));
+      return {
+        type: "rotate",
+        data: { pages: currentPages.map(createPageSnapshot) },
+      };
+    }
+    case "colorMode": {
+      const pageIds = snapshot.data.pagesModes.map(pm => pm.id);
+      const currentPages = pages.filter(p => pageIds.includes(p.id));
+      return {
+        type: "colorMode",
+        data: { pagesModes: currentPages.map(p => ({ id: p.id, mode: p.mode })) },
+      };
+    }
+    case "split": {
+      return {
+        type: "unsplit",
+        data: {
+          pageOrder: pages.map(p => p.id),
+          currentPages: pages.map(createPageSnapshot),
+        },
+      };
+    }
+    case "unsplit": {
+      return {
+        type: "split",
+        data: {
+          pageOrder: pages.map(p => p.id),
+          originalPages: pages.map(createPageSnapshot),
+        },
+      };
+    }
+    case "insertPages": {
+      // Inverse of inserting pages is removing them
+      const pageIds = snapshot.data.pagesToInsert.map(p => p.page.id);
+      return {
+        type: "removePages",
+        data: { pageIdsToRemove: pageIds },
+      };
+    }
+    case "removePages": {
+      // Inverse of removing pages is inserting them back
+      const pageIds = snapshot.data.pageIdsToRemove;
+      const pagesToRestore = pages.filter(p => pageIds.includes(p.id));
+      const pagesWithIndices = pagesToRestore.map(page => ({
+        index: pages.indexOf(page),
+        page: createPageSnapshot(page),
+      }));
+      return {
+        type: "insertPages",
+        data: { pagesToInsert: pagesWithIndices },
+      };
+    }
+    case "load": {
+      return {
+        type: "unload",
+        data: {
+          pageOrder: pages.map(p => p.id),
+          loadedPages: snapshot.data.newPageIds.map(id => {
+            const page = pages.find(p => p.id === id);
+            return createPageSnapshot(page);
+          }),
+        },
+      };
+    }
+    case "unload": {
+      return {
+        type: "load",
+        data: { newPageIds: snapshot.data.loadedPages.map(p => p.id) },
+      };
+    }
+    default:
+      console.error("Unknown snapshot type:", snapshot.type);
+      return snapshot;
+  }
+}
+
+// Apply a snapshot to restore state
+function applySnapshot(snapshot) {
+  switch (snapshot.type) {
+    case "reorder": {
+      const order = snapshot.data.pageOrder;
+      pages.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+      break;
+    }
+    case "rotate": {
+      const snapshotPages = snapshot.data.pages;
+      snapshotPages.forEach(snap => {
+        const pageIndex = pages.findIndex(p => p.id === snap.id);
+        if (pageIndex !== -1) {
+          pages[pageIndex] = restorePage(snap);
+        }
+      });
+      break;
+    }
+    case "colorMode": {
+      snapshot.data.pagesModes.forEach(({ id, mode }) => {
+        const page = pages.find(p => p.id === id);
+        if (page) {
+          page.mode = mode;
+          page.canvas = applyModeToCanvas(mode, page.originalCanvas);
+        }
+      });
+      break;
+    }
+    case "split": {
+      const originalPages = snapshot.data.originalPages.map(restorePage);
+      const order = snapshot.data.pageOrder;
+      const pageMap = new Map(originalPages.map(p => [p.id, p]));
+      pages.forEach(p => pageMap.set(p.id, p));
+      pages = order.map(id => pageMap.get(id)).filter(p => p);
+      break;
+    }
+    case "unsplit": {
+      const currentPages = snapshot.data.currentPages.map(restorePage);
+      const order = snapshot.data.pageOrder;
+      const pageMap = new Map(currentPages.map(p => [p.id, p]));
+      pages = order.map(id => pageMap.get(id)).filter(p => p);
+      break;
+    }
+    case "insertPages": {
+      // Insert pages at their original indices
+      const pagesToInsert = snapshot.data.pagesToInsert;
+      pagesToInsert.sort((a, b) => a.index - b.index);
+      pagesToInsert.forEach(({ index, page }) => {
+        pages.splice(index, 0, restorePage(page));
+      });
+      break;
+    }
+    case "removePages": {
+      // Remove pages by ID
+      const pageIdsToRemove = snapshot.data.pageIdsToRemove;
+      pages = pages.filter(p => !pageIdsToRemove.includes(p.id));
+      break;
+    }
+    case "load": {
+      // Undoing a load: remove the newly loaded pages
+      const newPageIds = snapshot.data.newPageIds;
+      pages = pages.filter(p => !newPageIds.includes(p.id));
+      break;
+    }
+    case "unload": {
+      // Redoing a load: restore the pages that were removed
+      const loadedPages = snapshot.data.loadedPages.map(restorePage);
+      const order = snapshot.data.pageOrder;
+      const pageMap = new Map(loadedPages.map(p => [p.id, p]));
+      pages.forEach(p => pageMap.set(p.id, p));
+      pages = order.map(id => pageMap.get(id)).filter(p => p);
+      break;
+    }
+    default:
+      console.error("Unknown snapshot type:", snapshot.type);
+  }
+  renderPages();
+}
 
 saveBtn.addEventListener("click", async () => {
   if (pages.length === 0) return;
