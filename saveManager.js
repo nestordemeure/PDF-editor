@@ -149,17 +149,55 @@ function applyOperationsToCanvas(canvas, operations) {
 
 /**
  * Converts canvas to image bytes
+ * Uses 1-bit PNG for B&W (extremely efficient), JPEG for color/grayscale
  */
-async function canvasToImageBytes(canvas, format, quality) {
+async function canvasToImageBytes(canvas, format, quality, colorMode) {
+  // For B&W, use 1-bit PNG (extremely efficient - 1 bit per pixel)
+  if (colorMode === "bw" || colorMode === "bw-otsu") {
+    const ctx = canvas.getContext("2d");
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imgData.data;
+
+    const rowBytes = Math.ceil(canvas.width / 8);
+    const packed = new Uint8Array(rowBytes * canvas.height);
+    let out = 0;
+    for (let y = 0; y < canvas.height; y++) {
+      let byte = 0;
+      let bit = 7;
+      for (let x = 0; x < canvas.width; x++) {
+        const i = (y * canvas.width + x) * 4;
+        const v = data[i] > 127 ? 1 : 0;
+        byte |= v << bit;
+        bit--;
+        if (bit < 0) {
+          packed[out++] = byte;
+          byte = 0;
+          bit = 7;
+        }
+      }
+      if (bit !== 7) packed[out++] = byte;
+    }
+
+    // Use UPNG for 1-bit PNG
+    if (typeof UPNG !== "undefined" && typeof UPNG.encodeLL === "function") {
+      try {
+        const encoded = UPNG.encodeLL([packed.buffer], canvas.width, canvas.height, 1, 0, 1);
+        return { bytes: new Uint8Array(encoded), mimeType: "image/png" };
+      } catch (e) {
+        // Fall through to standard encoding
+      }
+    }
+  }
+
+  // For color and grayscale, use JPEG (lossy compression works well for scanned content)
   return new Promise((resolve) => {
-    const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
     canvas.toBlob(async (blob) => {
       const arrayBuffer = await blob.arrayBuffer();
       resolve({
         bytes: new Uint8Array(arrayBuffer),
-        mimeType,
+        mimeType: "image/jpeg",
       });
-    }, mimeType, format === "jpeg" ? quality : undefined);
+    }, "image/jpeg", quality);
   });
 }
 
@@ -202,8 +240,8 @@ export async function renderAllPages({ pdfDoc, pages, outputFormat = "png", jpeg
     // Apply operations
     canvas = applyOperationsToCanvas(canvas, page.operations);
 
-    // Convert to image bytes
-    const { bytes, mimeType } = await canvasToImageBytes(canvas, outputFormat, jpegQuality);
+    // Convert to image bytes (pass colorMode for optimal encoding)
+    const { bytes, mimeType } = await canvasToImageBytes(canvas, outputFormat, jpegQuality, colorMode);
 
     // page.pageSizePts is already adjusted for operations (split, rotate) in tools.js
     results.push({

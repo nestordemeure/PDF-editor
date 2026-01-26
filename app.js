@@ -143,9 +143,10 @@ function mostCommonModeLabel() {
 
 function buildOutputFilename({ compression, ocrUsed }) {
   const baseName = sourceFileNames.size === 1 ? Array.from(sourceFileNames)[0] : "merged";
-  const parts = [baseName, compressionLabel(compression), mostCommonModeLabel(), ocrUsed ? "ocr" : ""]
+  const suffixParts = [compressionLabel(compression), mostCommonModeLabel(), ocrUsed ? "ocr" : ""]
     .filter(Boolean)
     .map(part => sanitizeFilenamePart(part, 24));
+  const parts = [baseName, ...suffixParts].filter(Boolean);
   return `${parts.join("_")}.pdf`;
 }
 
@@ -372,7 +373,7 @@ async function handleFiles(files) {
     sourcePdfDoc = await loadingTask.promise;
 
     // Track filename
-    const baseName = sanitizeFilenamePart(getFileStem(file.name));
+    const baseName = getFileStem(file.name) || "file";
     if (baseName) {
       sourceFileNames.clear();
       sourceFileNames.add(baseName);
