@@ -275,6 +275,7 @@ export async function runOcr({ renderedPages, lang, onProgress, onStatus, scribe
 
     const stageOrder = ["importImage", "convert", "export"];
     const totalSteps = Math.max(1, renderedPages.length * stageOrder.length);
+    let maxProgress = 0;
 
     scribeModule.opt.progressHandler = (message) => {
       if (!message || typeof message.n !== "number") return;
@@ -283,12 +284,19 @@ export async function runOcr({ renderedPages, lang, onProgress, onStatus, scribe
       const stepInStage = Math.min(message.n + 1, renderedPages.length);
       const overallStep = Math.min(stageIndex * renderedPages.length + stepInStage, totalSteps);
 
-      if (onProgress) onProgress(overallStep, totalSteps);
+      // Ensure progress never decreases (monotonic)
+      maxProgress = Math.max(maxProgress, overallStep);
+      if (onProgress) onProgress(maxProgress, totalSteps);
+
+      // Derive displayed stage and step from maxProgress for monotonic status text
+      const displayStageIndex = Math.min(Math.floor((maxProgress - 1) / renderedPages.length), stageOrder.length - 1);
+      const displayStep = maxProgress - displayStageIndex * renderedPages.length;
+      const displayStage = stageOrder[displayStageIndex] || "convert";
 
       let stageMessage = "Processing...";
-      if (stage === "importImage") stageMessage = `OCR: loading images ${stepInStage}/${renderedPages.length}`;
-      if (stage === "convert") stageMessage = `OCR: recognizing ${stepInStage}/${renderedPages.length}`;
-      if (stage === "export") stageMessage = `OCR: generating PDF ${stepInStage}/${renderedPages.length}`;
+      if (displayStage === "importImage") stageMessage = `OCR: loading images ${displayStep}/${renderedPages.length}`;
+      if (displayStage === "convert") stageMessage = `OCR: recognizing ${displayStep}/${renderedPages.length}`;
+      if (displayStage === "export") stageMessage = `OCR: generating PDF ${displayStep}/${renderedPages.length}`;
       if (onStatus) onStatus(stageMessage);
     };
 
