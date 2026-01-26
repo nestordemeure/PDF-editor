@@ -11,15 +11,43 @@ import { applyModeToCanvas, removeShading, enhanceContrast } from "./imageColorM
 // Batch size for memory control
 const BATCH_SIZE = 4;
 
+// Target DPI for compression levels (matches original imagePipeline.js)
+const TARGET_DPI = {
+  color: { none: 300, low: 180, medium: 150, high: 120 },
+  gray: { none: 300, low: 200, medium: 150, high: 120 },
+  bw: { none: 300, low: 260, medium: 200, high: 150 },
+};
+
 /**
- * Renders a PDF page to canvas at full resolution
+ * Gets the effective color mode from operations
  */
-async function renderPdfPageFullRes(pdfDoc, pageIndex) {
+function getColorMode(operations) {
+  for (let i = operations.length - 1; i >= 0; i--) {
+    if (operations[i].type === "colorMode") {
+      return operations[i].mode;
+    }
+  }
+  return "color";
+}
+
+/**
+ * Gets target DPI based on mode and compression
+ */
+function getTargetDpi(mode, compression) {
+  const modeKey = (mode === "bw" || mode === "bw-otsu") ? "bw" : (mode === "gray" ? "gray" : "color");
+  const dpiTable = TARGET_DPI[modeKey] || TARGET_DPI.gray;
+  return dpiTable[compression] || dpiTable.medium;
+}
+
+/**
+ * Renders a PDF page to canvas at specified DPI
+ */
+async function renderPdfPage(pdfDoc, pageIndex, dpi = 300) {
   const page = await pdfDoc.getPage(pageIndex + 1);
   const viewport = page.getViewport({ scale: 1 });
 
-  // Render at 300 DPI
-  const scale = 300 / 72;
+  // Render at specified DPI
+  const scale = dpi / 72;
   const scaledViewport = page.getViewport({ scale });
 
   const canvas = document.createElement("canvas");
@@ -155,7 +183,7 @@ function yieldToUi() {
 /**
  * Renders all pages in batches and returns image data
  */
-export async function renderAllPages({ pdfDoc, pages, outputFormat = "png", jpegQuality = 0.85, onProgress, onStatus }) {
+export async function renderAllPages({ pdfDoc, pages, outputFormat = "png", jpegQuality = 0.85, compression = "high", onProgress, onStatus }) {
   const results = [];
 
   for (let i = 0; i < pages.length; i++) {
@@ -164,8 +192,12 @@ export async function renderAllPages({ pdfDoc, pages, outputFormat = "png", jpeg
     if (onStatus) onStatus(`Rendering page ${i + 1}/${pages.length}`);
     if (onProgress) onProgress(i + 1, pages.length);
 
-    // Render from PDF
-    let canvas = await renderPdfPageFullRes(pdfDoc, page.sourcePageIndex);
+    // Determine color mode and target DPI
+    const colorMode = getColorMode(page.operations);
+    const targetDpi = getTargetDpi(colorMode, compression);
+
+    // Render from PDF at target DPI (already downscaled for compression)
+    let canvas = await renderPdfPage(pdfDoc, page.sourcePageIndex, targetDpi);
 
     // Apply operations
     canvas = applyOperationsToCanvas(canvas, page.operations);
@@ -266,6 +298,7 @@ export async function savePdf({ pdfBytes, pages, options, onProgress, onStatus }
     pages,
     outputFormat,
     jpegQuality,
+    compression,
     onProgress,
     onStatus,
   });
