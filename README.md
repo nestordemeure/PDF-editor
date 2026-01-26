@@ -33,3 +33,4 @@ cp -R node_modules/scribe.js-ocr/mupdf vendor/mupdf
 * sometimes pdfs are not scans but rather produced with Words, etc. how do we deal with that?
 * memorize OCR so that it is not redone if we resave a document with no modification to pages?
 * nothing runs when we are not on the tab, use web workers to solve that?
+* do not truncate the original name or change its spaces etc when renaming, just add a suffix to it
