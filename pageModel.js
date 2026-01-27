@@ -19,14 +19,16 @@ export function generatePageId() {
 /**
  * Creates a new page object
  * @param {Object} params
+ * @param {string} params.sourceId - ID of the source PDF
  * @param {number} params.sourcePageIndex - Index in the source PDF (0-based)
  * @param {Object} params.pageSizePts - Page size in points { width, height }
  * @param {HTMLCanvasElement} params.thumbnail - Low-res thumbnail canvas
  * @returns {Object} Page object
  */
-export function createPage({ sourcePageIndex, pageSizePts, thumbnail }) {
+export function createPage({ sourceId, sourcePageIndex, pageSizePts, thumbnail }) {
   return {
     id: generatePageId(),
+    sourceId,
     sourcePageIndex,
     pageSizePts: { ...pageSizePts },
     operations: [],
@@ -48,6 +50,7 @@ export function cloneOperations(operations) {
 export function createPageSnapshot(page) {
   return {
     id: page.id,
+    sourceId: page.sourceId,
     sourcePageIndex: page.sourcePageIndex,
     pageSizePts: { ...page.pageSizePts },
     operations: cloneOperations(page.operations),
@@ -61,6 +64,7 @@ export function createPageSnapshot(page) {
 export function restorePageFromSnapshot(snapshot, thumbnail) {
   return {
     id: snapshot.id,
+    sourceId: snapshot.sourceId,
     sourcePageIndex: snapshot.sourcePageIndex,
     pageSizePts: { ...snapshot.pageSizePts },
     operations: cloneOperations(snapshot.operations),

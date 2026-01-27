@@ -208,12 +208,12 @@ function applyAdaptiveToThumbnail(canvas, page) {
  * @param {Object} params
  * @param {Array} params.pages - All pages
  * @param {string} params.mode - Color mode ('color', 'gray', 'bw', 'bw-otsu')
- * @param {Object} params.pdfDoc - PDF.js document for thumbnail updates
+ * @param {Function} params.getPdfDocForPage - Returns PDF.js document for a page
  * @param {Function} params.setProgress - Progress callback
  * @param {Function} params.setStatus - Status callback
  * @param {Function} params.yieldToUi - Yield to UI callback
  */
-export async function applyColorModeToSelection({ pages, mode, pdfDoc, setProgress, setStatus, yieldToUi }) {
+export async function applyColorModeToSelection({ pages, mode, getPdfDocForPage, setProgress, setStatus, yieldToUi }) {
   const selected = pages.filter(page => page.selected);
 
   for (let i = 0; i < selected.length; i++) {
@@ -227,6 +227,10 @@ export async function applyColorModeToSelection({ pages, mode, pdfDoc, setProgre
 
     if (mode === "color") {
       // Restore original colors - need to re-render from PDF
+      const pdfDoc = getPdfDocForPage ? getPdfDocForPage(page) : null;
+      if (!pdfDoc) {
+        throw new Error("Missing PDF source for page thumbnail.");
+      }
       await updatePageThumbnail({ pdfDoc, page });
     } else if (mode === "gray") {
       // Apply grayscale directly to thumbnail
@@ -291,6 +295,7 @@ export async function splitSelection({ pages, pdfDoc, setProgress, setStatus, yi
       // Create left half page - reuse existing thumbnail
       const leftPage = {
         id: generatePageId(),
+        sourceId: page.sourceId,
         sourcePageIndex: page.sourcePageIndex,
         pageSizePts: { width: page.pageSizePts.width / 2, height: page.pageSizePts.height },
         operations: [...cloneOperations(page.operations), createSplitOp("left")],
@@ -301,6 +306,7 @@ export async function splitSelection({ pages, pdfDoc, setProgress, setStatus, yi
       // Create right half page - reuse existing thumbnail
       const rightPage = {
         id: generatePageId(),
+        sourceId: page.sourceId,
         sourcePageIndex: page.sourcePageIndex,
         pageSizePts: { width: page.pageSizePts.width / 2, height: page.pageSizePts.height },
         operations: [...cloneOperations(page.operations), createSplitOp("right")],

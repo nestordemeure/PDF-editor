@@ -9,7 +9,7 @@
  */
 
 import { createPage, createPageSnapshot, cloneOperations, getEffectiveColorMode } from "./pageModel.js";
-import { renderPdfPageThumbnail, updatePageThumbnail, updateThumbnailsBatch } from "./thumbnailRenderer.js";
+import { renderPdfPageThumbnail, updatePageThumbnail } from "./thumbnailRenderer.js";
 import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection } from "./tools.js";
 import { savePdf, terminatePool } from "./saveManager.js";
 
@@ -63,8 +63,8 @@ let activePreviewId = null;
 let scribeModule = null;
 
 // Source PDF storage
-let sourcePdfBytes = null;  // ArrayBuffer of the loaded PDF
-let sourcePdfDoc = null;    // PDF.js document for thumbnail rendering
+const sourcePdfs = new Map(); // sourceId -> { bytes, pdfDoc, name }
+let sourceIdCounter = 0;
 
 const sourceFileNames = new Set();
 
@@ -99,6 +99,16 @@ function getFileStem(filename) {
   if (!filename) return "file";
   const lastDot = filename.lastIndexOf(".");
   return lastDot > 0 ? filename.slice(0, lastDot) : filename;
+}
+
+function createSourceId() {
+  sourceIdCounter += 1;
+  return `source_${Date.now()}_${sourceIdCounter}`;
+}
+
+function getPdfDocForPage(page) {
+  if (!page || !page.sourceId) return null;
+  return sourcePdfs.get(page.sourceId)?.pdfDoc || null;
 }
 
 function sanitizeFilenamePart(value, maxLength = 40) {
@@ -166,6 +176,7 @@ function createStateSnapshot() {
   return {
     pages: pages.map(page => ({
       id: page.id,
+      sourceId: page.sourceId,
       sourcePageIndex: page.sourcePageIndex,
       pageSizePts: { ...page.pageSizePts },
       operations: cloneOperations(page.operations),
@@ -187,6 +198,7 @@ async function restoreStateFromSnapshot(snapshot) {
     const oldPage = oldPagesById.get(snap.id);
     return {
       id: snap.id,
+      sourceId: snap.sourceId,
       sourcePageIndex: snap.sourcePageIndex,
       pageSizePts: { ...snap.pageSizePts },
       operations: cloneOperations(snap.operations),
@@ -197,13 +209,15 @@ async function restoreStateFromSnapshot(snapshot) {
 
   // Regenerate missing thumbnails
   const pagesNeedingThumbnails = pages.filter(p => !p.thumbnail);
-  if (pagesNeedingThumbnails.length > 0 && sourcePdfDoc) {
+  if (pagesNeedingThumbnails.length > 0 && sourcePdfs.size > 0) {
     setStatus("Regenerating thumbnails...");
-    await updateThumbnailsBatch({
-      pdfDoc: sourcePdfDoc,
-      pages: pagesNeedingThumbnails,
-      onProgress: (i, total) => setProgress(i, total),
-    });
+    for (let i = 0; i < pagesNeedingThumbnails.length; i++) {
+      const page = pagesNeedingThumbnails[i];
+      const pdfDoc = getPdfDocForPage(page);
+      if (!pdfDoc) continue;
+      await updatePageThumbnail({ pdfDoc, page });
+      setProgress(i + 1, pagesNeedingThumbnails.length);
+    }
     endProgress();
   }
 }
@@ -356,63 +370,73 @@ async function loadScribe() {
 async function handleFiles(files) {
   if (!files.length) return;
 
-  // Currently we only support loading one PDF at a time in the new model
-  // (Multiple PDFs would require storing multiple source buffers)
-  const file = Array.from(files).find(f => f.type === "application/pdf");
-  if (!file) return;
+  const pdfFiles = Array.from(files).filter(f => f.type === "application/pdf");
+  if (pdfFiles.length === 0) return;
 
-  setStatus(`Loading ${file.name}...`);
+  setStatus(`Loading ${pdfFiles.length} PDF${pdfFiles.length === 1 ? "" : "s"}...`);
   setProgress(0, 1);
 
   try {
-    // Store source PDF bytes
-    sourcePdfBytes = await file.arrayBuffer();
+    // Reset state for new load
+    pages = [];
+    history = [];
+    future = [];
+    sourcePdfs.clear();
+    sourceFileNames.clear();
 
-    // Load PDF.js document for thumbnail rendering
-    const loadingTask = pdfjsLib.getDocument({ data: sourcePdfBytes.slice(0) });
-    sourcePdfDoc = await loadingTask.promise;
+    // Load all PDFs first to get counts
+    const sources = [];
+    for (const file of pdfFiles) {
+      const bytes = await file.arrayBuffer();
+      const loadingTask = pdfjsLib.getDocument({ data: bytes.slice(0) });
+      const pdfDoc = await loadingTask.promise;
+      const sourceId = createSourceId();
+      const baseName = getFileStem(file.name) || "file";
 
-    // Track filename
-    const baseName = getFileStem(file.name) || "file";
-    if (baseName) {
-      sourceFileNames.clear();
-      sourceFileNames.add(baseName);
+      sourcePdfs.set(sourceId, { bytes, pdfDoc, name: baseName });
+      if (baseName) sourceFileNames.add(baseName);
+
+      sources.push({ sourceId, pdfDoc, numPages: pdfDoc.numPages, name: baseName });
     }
 
     // Create page objects with thumbnails
     const newPages = [];
-    const numPages = sourcePdfDoc.numPages;
+    const totalPages = sources.reduce((sum, source) => sum + source.numPages, 0);
+    let loadedPages = 0;
 
-    for (let i = 0; i < numPages; i++) {
-      setStatus(`Loading page ${i + 1}/${numPages}`);
-      setProgress(i + 1, numPages);
+    for (const source of sources) {
+      for (let i = 0; i < source.numPages; i++) {
+        loadedPages += 1;
+        setStatus(`Loading ${source.name || "file"} page ${i + 1}/${source.numPages}`);
+        setProgress(loadedPages, totalPages);
 
-      const { canvas: thumbnail, pageSizePts } = await renderPdfPageThumbnail({
-        pdfDoc: sourcePdfDoc,
-        pageIndex: i,
-      });
+        const { canvas: thumbnail, pageSizePts } = await renderPdfPageThumbnail({
+          pdfDoc: source.pdfDoc,
+          pageIndex: i,
+        });
 
-      const page = createPage({
-        sourcePageIndex: i,
-        pageSizePts,
-        thumbnail,
-      });
+        const page = createPage({
+          sourceId: source.sourceId,
+          sourcePageIndex: i,
+          pageSizePts,
+          thumbnail,
+        });
 
-      // Apply default grayscale mode
-      page.operations.push({ type: "colorMode", mode: "gray" });
+        // Apply default grayscale mode
+        page.operations.push({ type: "colorMode", mode: "gray" });
 
-      // Update thumbnail to show grayscale
-      await updatePageThumbnail({ pdfDoc: sourcePdfDoc, page });
+        // Update thumbnail to show grayscale
+        await updatePageThumbnail({ pdfDoc: source.pdfDoc, page });
 
-      newPages.push(page);
-      await yieldToUi();
+        newPages.push(page);
+        await yieldToUi();
+      }
     }
 
-    // Replace pages (for now, single PDF support)
     pages = newPages;
     pushHistory();
 
-    setStatus(`Loaded ${numPages} page${numPages === 1 ? "" : "s"}.`);
+    setStatus(`Loaded ${totalPages} page${totalPages === 1 ? "" : "s"}.`);
     endProgress();
     renderPages();
   } catch (error) {
@@ -433,13 +457,13 @@ fileInput.addEventListener("change", event => {
 
 rotateBtn.addEventListener("click", async () => {
   const selected = getSelectedPages();
-  if (selected.length === 0 || !sourcePdfDoc) return;
+  if (selected.length === 0 || sourcePdfs.size === 0) return;
 
   pushHistory();
   setProgress(0, selected.length);
   setStatus(`Rotating ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await rotateSelection({ pages, pdfDoc: sourcePdfDoc, setProgress, setStatus, yieldToUi });
+  await rotateSelection({ pages, setProgress, setStatus, yieldToUi });
 
   renderPages();
   endProgress();
@@ -448,14 +472,14 @@ rotateBtn.addEventListener("click", async () => {
 
 colorModeSelect.addEventListener("change", async () => {
   const selected = getSelectedPages();
-  if (selected.length === 0 || !sourcePdfDoc) return;
+  if (selected.length === 0 || sourcePdfs.size === 0) return;
 
   const mode = colorModeSelect.value;
   pushHistory();
   setProgress(0, selected.length);
   setStatus(`Applying color mode to ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await applyColorModeToSelection({ pages, mode, pdfDoc: sourcePdfDoc, setProgress, setStatus, yieldToUi });
+  await applyColorModeToSelection({ pages, mode, getPdfDocForPage, setProgress, setStatus, yieldToUi });
 
   renderPages();
   endProgress();
@@ -464,13 +488,13 @@ colorModeSelect.addEventListener("change", async () => {
 
 splitBtn.addEventListener("click", async () => {
   const selected = getSelectedPages();
-  if (selected.length === 0 || !sourcePdfDoc) return;
+  if (selected.length === 0 || sourcePdfs.size === 0) return;
 
   pushHistory();
   setProgress(0, pages.length);
   setStatus("Splitting pages...");
 
-  const nextPages = await splitSelection({ pages, pdfDoc: sourcePdfDoc, setProgress, setStatus, yieldToUi });
+  const nextPages = await splitSelection({ pages, setProgress, setStatus, yieldToUi });
   pages = nextPages;
 
   renderPages();
@@ -496,13 +520,13 @@ deleteBtn.addEventListener("click", async () => {
 
 removeShadingBtn.addEventListener("click", async () => {
   const selected = getSelectedPages();
-  if (selected.length === 0 || !sourcePdfDoc) return;
+  if (selected.length === 0 || sourcePdfs.size === 0) return;
 
   pushHistory();
   setProgress(0, selected.length);
   setStatus(`Removing shading from ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await removeShadingSelection({ pages, pdfDoc: sourcePdfDoc, setProgress, setStatus, yieldToUi });
+  await removeShadingSelection({ pages, setProgress, setStatus, yieldToUi });
 
   renderPages();
   endProgress();
@@ -511,13 +535,13 @@ removeShadingBtn.addEventListener("click", async () => {
 
 enhanceContrastBtn.addEventListener("click", async () => {
   const selected = getSelectedPages();
-  if (selected.length === 0 || !sourcePdfDoc) return;
+  if (selected.length === 0 || sourcePdfs.size === 0) return;
 
   pushHistory();
   setProgress(0, selected.length);
   setStatus(`Enhancing contrast for ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await enhanceContrastSelection({ pages, pdfDoc: sourcePdfDoc, setProgress, setStatus, yieldToUi });
+  await enhanceContrastSelection({ pages, setProgress, setStatus, yieldToUi });
 
   renderPages();
   endProgress();
@@ -560,7 +584,7 @@ redoBtn.addEventListener("click", async () => {
 });
 
 saveBtn.addEventListener("click", async () => {
-  if (pages.length === 0 || !sourcePdfBytes) return;
+  if (pages.length === 0 || sourcePdfs.size === 0) return;
 
   setStatus("Preparing to save...");
   setProgress(0, 1);
@@ -578,7 +602,7 @@ saveBtn.addEventListener("click", async () => {
 
     // Save using the worker pool
     const { pdfBytes, ocrUsed } = await savePdf({
-      pdfBytes: sourcePdfBytes,
+      pdfSources: sourcePdfs,
       pages,
       options: {
         compression,

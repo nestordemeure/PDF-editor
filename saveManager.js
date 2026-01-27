@@ -221,11 +221,15 @@ function yieldToUi() {
 /**
  * Renders all pages in batches and returns image data
  */
-export async function renderAllPages({ pdfDoc, pages, outputFormat = "png", jpegQuality = 0.85, compression = "high", onProgress, onStatus }) {
+export async function renderAllPages({ pages, getPdfDocForPage, outputFormat = "png", jpegQuality = 0.85, compression = "high", onProgress, onStatus }) {
   const results = [];
 
   for (let i = 0; i < pages.length; i++) {
     const page = pages[i];
+    const pdfDoc = getPdfDocForPage ? await getPdfDocForPage(page) : null;
+    if (!pdfDoc) {
+      throw new Error("Missing PDF source for page rendering.");
+    }
 
     if (onStatus) onStatus(`Rendering page ${i + 1}/${pages.length}`);
     if (onProgress) onProgress(i + 1, pages.length);
@@ -326,12 +330,34 @@ export async function runOcr({ renderedPages, lang, onProgress, onStatus, scribe
 /**
  * Main save function
  */
-export async function savePdf({ pdfBytes, pages, options, onProgress, onStatus }) {
+export async function savePdf({ pdfSources, pages, options, onProgress, onStatus }) {
   const { compression, ocrLang, scribeModule, PDFDocument } = options;
 
-  // Get PDF.js document for rendering
+  // Build a sourceId -> pdfDoc lookup
   const pdfjsLib = window["pdfjs-dist/build/pdf"];
-  const pdfDoc = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
+  const pdfDocCache = new Map();
+
+  const getPdfDocForPage = async (page) => {
+    if (!page || !page.sourceId || !pdfSources) return null;
+    if (pdfDocCache.has(page.sourceId)) {
+      return await pdfDocCache.get(page.sourceId);
+    }
+
+    const source = pdfSources.get ? pdfSources.get(page.sourceId) : pdfSources[page.sourceId];
+    if (!source) return null;
+    if (source.pdfDoc) {
+      pdfDocCache.set(page.sourceId, source.pdfDoc);
+      return source.pdfDoc;
+    }
+    if (!source.bytes) return null;
+
+    const loadingTask = pdfjsLib.getDocument({ data: source.bytes.slice(0) });
+    const promise = loadingTask.promise;
+    pdfDocCache.set(page.sourceId, promise);
+    const pdfDoc = await promise;
+    pdfDocCache.set(page.sourceId, pdfDoc);
+    return pdfDoc;
+  };
 
   // Determine output format
   const outputFormat = compression === "none" ? "png" : "jpeg";
@@ -340,8 +366,8 @@ export async function savePdf({ pdfBytes, pages, options, onProgress, onStatus }
   // Phase 1: Render all pages
   if (onStatus) onStatus("Rendering pages...");
   const renderedPages = await renderAllPages({
-    pdfDoc,
     pages,
+    getPdfDocForPage,
     outputFormat,
     jpegQuality,
     compression,
