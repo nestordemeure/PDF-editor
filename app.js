@@ -185,6 +185,22 @@ function createStateSnapshot() {
   };
 }
 
+function operationsEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const left = a[i];
+    const right = b[i];
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    if (leftKeys.length !== rightKeys.length) return false;
+    for (const key of leftKeys) {
+      if (left[key] !== right[key]) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Restores state from a snapshot.
  * Thumbnails need to be regenerated.
@@ -196,6 +212,12 @@ async function restoreStateFromSnapshot(snapshot) {
   // Restore pages
   pages = snapshot.pages.map(snap => {
     const oldPage = oldPagesById.get(snap.id);
+    const needsThumbnail =
+      !oldPage ||
+      !oldPage.thumbnail ||
+      oldPage.sourceId !== snap.sourceId ||
+      oldPage.sourcePageIndex !== snap.sourcePageIndex ||
+      !operationsEqual(oldPage.operations, snap.operations);
     return {
       id: snap.id,
       sourceId: snap.sourceId,
@@ -203,7 +225,7 @@ async function restoreStateFromSnapshot(snapshot) {
       pageSizePts: { ...snap.pageSizePts },
       operations: cloneOperations(snap.operations),
       selected: snap.selected,
-      thumbnail: oldPage?.thumbnail || null, // Reuse if available
+      thumbnail: needsThumbnail ? null : oldPage.thumbnail, // Reuse only if still valid
     };
   });
 
