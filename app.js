@@ -579,26 +579,27 @@ selectAllToggle.addEventListener("change", () => {
 });
 
 undoBtn.addEventListener("click", async () => {
-  if (history.length <= 1) return; // Keep at least the initial state
+  if (history.length === 0) return;
 
   const currentState = createStateSnapshot();
   future.push(currentState);
 
-  history.pop(); // Remove current state
-  const previousState = history[history.length - 1];
+  const previousState = history.pop();
+  if (!previousState) return;
 
-  if (previousState) {
-    await restoreStateFromSnapshot(previousState);
-    renderPages();
-    setStatus("Undo complete.");
-  }
+  await restoreStateFromSnapshot(previousState);
+  renderPages();
+  setStatus("Undo complete.");
 });
 
 redoBtn.addEventListener("click", async () => {
   if (future.length === 0) return;
 
+  const currentState = createStateSnapshot();
+  history.push(currentState);
+
   const nextState = future.pop();
-  history.push(nextState);
+  if (!nextState) return;
 
   await restoreStateFromSnapshot(nextState);
   renderPages();
