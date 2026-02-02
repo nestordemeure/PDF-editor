@@ -34,3 +34,5 @@ cp -R node_modules/scribe.js-ocr/mupdf vendor/mupdf
 * memorize OCR so that it is not redone if we resave a document with no modification to pages?
 * nothing runs when we are not on the tab, can we solve that?
   * unlikely without some large changes
+* add option to remove all text, keeping only scans of images?
+* OCR does not seem properly aligned with text
