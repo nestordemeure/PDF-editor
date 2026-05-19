@@ -27,8 +27,3 @@ cp -R node_modules/scribe.js-ocr/tess vendor/tess
 cp -R node_modules/scribe.js-ocr/fonts vendor/fonts
 cp -R node_modules/scribe.js-ocr/mupdf vendor/mupdf
 ```
-
-## TODO
-
-* nothing runs when we are not on the tab, can we solve that?
-  * unlikely without some large changes

@@ -226,6 +226,13 @@ function releaseCanvas(canvas) {
  * Yields to UI to prevent freezing
  */
 function yieldToUi() {
+  if (document.hidden) {
+    return new Promise(resolve => {
+      const mc = new MessageChannel();
+      mc.port1.onmessage = () => resolve();
+      mc.port2.postMessage(undefined);
+    });
+  }
   return new Promise(resolve => requestAnimationFrame(() => resolve()));
 }
 
