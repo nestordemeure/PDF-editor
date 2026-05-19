@@ -152,20 +152,3 @@ export function getTotalRotation(operations) {
   }
   return ((total % 360) + 360) % 360;
 }
-
-/**
- * Calculates the effective page size after operations
- */
-export function getEffectivePageSize(pageSizePts, operations) {
-  let { width, height } = pageSizePts;
-
-  for (const op of operations) {
-    if (op.type === OperationType.ROTATE && (op.degrees === 90 || op.degrees === 270)) {
-      [width, height] = [height, width];
-    } else if (op.type === OperationType.SPLIT) {
-      width = width / 2;
-    }
-  }
-
-  return { width, height };
-}

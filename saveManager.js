@@ -179,12 +179,20 @@ async function canvasToImageBytes(canvas, format, quality, colorMode) {
     }
 
     // Use UPNG for 1-bit PNG
-    if (typeof UPNG !== "undefined" && typeof UPNG.encodeLL === "function") {
+    if (typeof UPNG !== "undefined") {
+      if (typeof UPNG.encodeLL === "function") {
+        try {
+          const encoded = UPNG.encodeLL([packed.buffer], canvas.width, canvas.height, 1, 0, 1);
+          return { bytes: new Uint8Array(encoded), mimeType: "image/png" };
+        } catch (e) {
+          // Fall through to 8-bit PNG fallback
+        }
+      }
       try {
-        const encoded = UPNG.encodeLL([packed.buffer], canvas.width, canvas.height, 1, 0, 1);
+        const encoded = UPNG.encode([imgData.data.buffer], canvas.width, canvas.height, 0);
         return { bytes: new Uint8Array(encoded), mimeType: "image/png" };
       } catch (e) {
-        // Fall through to standard encoding
+        // Fall through to JPEG
       }
     }
   }
@@ -192,6 +200,13 @@ async function canvasToImageBytes(canvas, format, quality, colorMode) {
   // For color and grayscale, use JPEG (lossy compression works well for scanned content)
   return new Promise((resolve) => {
     canvas.toBlob(async (blob) => {
+      if (!blob) {
+        const dataUrl = canvas.toDataURL("image/jpeg", quality);
+        const response = await fetch(dataUrl);
+        const arrayBuffer = await response.arrayBuffer();
+        resolve({ bytes: new Uint8Array(arrayBuffer), mimeType: "image/jpeg" });
+        return;
+      }
       const arrayBuffer = await blob.arrayBuffer();
       resolve({
         bytes: new Uint8Array(arrayBuffer),
