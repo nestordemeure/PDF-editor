@@ -5,13 +5,13 @@
  * - Stores source PDF bytes (small) instead of full-resolution canvases (large)
  * - Pages store references + operation lists
  * - Thumbnails provide low-res previews
- * - Full rendering happens at save time using worker pool
+ * - Full rendering happens at save time
  */
 
-import { createPage, createPageSnapshot, cloneOperations, getEffectiveColorMode } from "./pageModel.js";
+import { createPage, cloneOperations, getEffectiveColorMode } from "./pageModel.js";
 import { renderPdfPageThumbnail, updatePageThumbnail } from "./thumbnailRenderer.js";
 import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection } from "./tools.js";
-import { savePdf, terminatePool } from "./saveManager.js";
+import { savePdf } from "./saveManager.js";
 
 // DOM Elements
 const fileInput = document.getElementById("fileInput");
@@ -656,11 +656,6 @@ saveBtn.addEventListener("click", async () => {
     setStatus(`Save failed: ${error.message}`);
     endProgress();
   }
-});
-
-// Cleanup on page unload
-window.addEventListener("beforeunload", () => {
-  terminatePool();
 });
 
 // Initial status

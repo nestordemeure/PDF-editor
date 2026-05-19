@@ -44,35 +44,6 @@ export function cloneOperations(operations) {
   return operations.map(op => ({ ...op }));
 }
 
-/**
- * Creates a snapshot of a page for history
- */
-export function createPageSnapshot(page) {
-  return {
-    id: page.id,
-    sourceId: page.sourceId,
-    sourcePageIndex: page.sourcePageIndex,
-    pageSizePts: { ...page.pageSizePts },
-    operations: cloneOperations(page.operations),
-    selected: page.selected,
-  };
-}
-
-/**
- * Restores a page from a snapshot (thumbnail needs to be regenerated)
- */
-export function restorePageFromSnapshot(snapshot, thumbnail) {
-  return {
-    id: snapshot.id,
-    sourceId: snapshot.sourceId,
-    sourcePageIndex: snapshot.sourcePageIndex,
-    pageSizePts: { ...snapshot.pageSizePts },
-    operations: cloneOperations(snapshot.operations),
-    thumbnail,
-    selected: snapshot.selected,
-  };
-}
-
 // ============================================
 // Operation Types
 // ============================================
@@ -140,15 +111,3 @@ export function getEffectiveColorMode(operations) {
   return 'color';
 }
 
-/**
- * Gets the total rotation from operations list (in degrees, 0-359)
- */
-export function getTotalRotation(operations) {
-  let total = 0;
-  for (const op of operations) {
-    if (op.type === OperationType.ROTATE) {
-      total += op.degrees;
-    }
-  }
-  return ((total % 360) + 360) % 360;
-}

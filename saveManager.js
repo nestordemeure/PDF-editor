@@ -11,7 +11,7 @@ import { applyModeToCanvas, removeShading, enhanceContrast } from "./imageColorM
 // Batch size for memory control
 const BATCH_SIZE = 4;
 
-// Target DPI for compression levels (matches original imagePipeline.js)
+// Target DPI for compression levels
 const TARGET_DPI = {
   color: { none: 300, low: 180, medium: 150, high: 120 },
   gray: { none: 300, low: 200, medium: 150, high: 120 },
@@ -105,18 +105,12 @@ function applyOperationsToCanvas(canvas, operations) {
       const times = ((op.degrees / 90) % 4 + 4) % 4;
       for (let i = 0; i < times; i++) {
         const rotated = rotateCanvas90(current);
-        if (current !== canvas) {
-          current.width = 0;
-          current.height = 0;
-        }
+        releaseCanvas(current);
         current = rotated;
       }
     } else if (op.type === "split") {
       const cropped = cropCanvasHalf(current, op.side);
-      if (current !== canvas) {
-        current.width = 0;
-        current.height = 0;
-      }
+      releaseCanvas(current);
       current = cropped;
     }
   }
@@ -131,7 +125,9 @@ function applyOperationsToCanvas(canvas, operations) {
   }
 
   if (colorMode !== "color") {
+    const prev = current;
     current = applyModeToCanvas(colorMode, current);
+    releaseCanvas(prev);
   }
 
   // Apply shading removal
@@ -482,7 +478,3 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
   return { pdfBytes: finalPdfBytes, ocrUsed };
 }
 
-// No worker pool needed anymore
-export function terminatePool() {
-  // No-op for compatibility
-}
