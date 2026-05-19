@@ -402,18 +402,26 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
         if (onStatus) onStatus(`Embedding image ${i + 1}/${pageCount}`);
 
         const rendered = renderedPages[i];
+        const targetW = rendered.pageSizePts.width;
+        const targetH = rendered.pageSizePts.height;
+
         const pdfPage = ocrPdfDoc.getPage(i);
-        pdfPage.setSize(rendered.pageSizePts.width, rendered.pageSizePts.height);
+        const { width: ocrW, height: ocrH } = pdfPage.getSize();
+
+        // Scale OCR text layer from pixel coords to target point coords
+        pdfPage.scaleContent(targetW / ocrW, targetH / ocrH);
+        pdfPage.setSize(targetW, targetH);
 
         const image = rendered.mimeType === "image/jpeg"
           ? await ocrPdfDoc.embedJpg(rendered.bytes)
           : await ocrPdfDoc.embedPng(rendered.bytes);
 
+        // Compensate drawImage dimensions for the active scale transform
         pdfPage.drawImage(image, {
           x: 0,
           y: 0,
-          width: rendered.pageSizePts.width,
-          height: rendered.pageSizePts.height,
+          width: ocrW,
+          height: ocrH,
         });
 
         if (i % BATCH_SIZE === 0) await yieldToUi();
