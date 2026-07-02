@@ -11,7 +11,7 @@ Open the [GitHub Pages version](https://nestordemeure.github.io/PDF-editor/), or
 - Rotate 90°, split double pages down the middle, delete pages.
 - Clean up scans: grayscale, black & white (flat or adaptive), shadow removal, contrast enhancement.
 - Undo / redo.
-- Optional OCR (17 languages) that adds an invisible, selectable text layer.
+- Optional OCR that adds an invisible, selectable text layer.
 - Export a compact PDF: B&W pages are CCITT G4 compressed, grayscale/color pages use MozJPEG, with four compression levels from lossless to high.
 
 ## Usage

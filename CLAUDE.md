@@ -4,15 +4,19 @@ In-browser PDF cleanup tool for scanned books. Vanilla JS ES modules, no build s
 
 ## Code organization
 
+App code lives in `src/`; `index.html`, `style.css`, and `serve.sh` stay at the root (GitHub Pages serves the repo root). `test data/` holds a sample scan for testing.
+
 | File | Role |
 |---|---|
-| `app.js` | UI wiring, app state (`pages`, `sourcePdfs`), undo/redo history, incremental page-grid rendering, load/save entry points |
-| `pageModel.js` | Page objects and the operation list model (`rotate`, `split`, `colorMode`, `removeShading`, `enhanceContrast`) |
-| `tools.js` | Commands that edit operation lists and update thumbnails; `forEachConcurrent` helper |
-| `thumbnailRenderer.js` | PDF.js page rendering, base-thumbnail cache, geometric canvas ops, `applyOperationsToCanvas` (the canonical pipeline) |
-| `imagePixelOps.js` | DOM-free pixel operations on `ImageData` + `encodeProcessedImage` (G4 / raw-gray / MozJPEG / PNG) |
-| `saveWorker.js` | Module worker: runs the pixel pipeline + encoding per page |
-| `saveManager.js` | Save orchestration: render pages, worker pool, OCR (scribe.js), PDF assembly with pdf-lib |
+| `src/app.js` | Entry point: UI wiring, app state (`pages`, `sourcePdfs`), undo/redo history, incremental page-grid rendering, load/save handlers |
+| `src/pageModel.js` | Page objects and the operation list model (`rotate`, `split`, `colorMode`, `removeShading`, `enhanceContrast`) |
+| `src/pageCommands.js` | Commands that edit operation lists and update thumbnails; `forEachConcurrent` helper |
+| `src/pageRenderer.js` | PDF.js page rendering, base-thumbnail cache, geometric canvas ops, `applyOperationsToCanvas` (the canonical pipeline) |
+| `src/imagePixelOps.js` | DOM-free pixel operations on `ImageData` + `encodeProcessedImage` (G4 / raw-gray / MozJPEG / PNG) |
+| `src/saveWorker.js` | Module worker: runs the pixel pipeline + encoding per page |
+| `src/saveManager.js` | Save orchestration: render pages, worker pool, OCR (scribe.js), PDF assembly with pdf-lib |
+
+Dependency direction: `app.js` → `pageCommands.js`/`saveManager.js` → `pageRenderer.js` → `imagePixelOps.js` → `pageModel.js` + `vendor/`. Keep it acyclic and keep DOM access out of `imagePixelOps.js`.
 
 ## Architecture
 

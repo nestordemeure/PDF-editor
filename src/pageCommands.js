@@ -17,7 +17,7 @@ import {
   createEnhanceContrastOp,
   cloneOperations,
 } from "./pageModel.js";
-import { updatePageThumbnail, rotateCanvas90, cropCanvasHalf } from "./thumbnailRenderer.js";
+import { updatePageThumbnail, rotateCanvas90, cropCanvasHalf } from "./pageRenderer.js";
 
 // Concurrent PDF.js renders during thumbnail regeneration
 export const THUMBNAIL_CONCURRENCY = 3;

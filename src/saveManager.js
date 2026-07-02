@@ -10,10 +10,10 @@
  * - Everything else: JPEG (MozJPEG) at a quality matching the compression level.
  */
 
-import { applyGeometricOpsToCanvas } from "./thumbnailRenderer.js";
+import { applyGeometricOpsToCanvas } from "./pageRenderer.js";
 import { applyPixelPipeline, encodeProcessedImage } from "./imagePixelOps.js";
 import { getEffectiveColorMode } from "./pageModel.js";
-import { forEachConcurrent } from "./tools.js";
+import { forEachConcurrent } from "./pageCommands.js";
 
 // Pages rendered concurrently during save (overlaps PDF.js decoding with
 // main-thread rasterization and worker dispatch)

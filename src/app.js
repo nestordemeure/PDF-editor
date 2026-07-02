@@ -9,8 +9,8 @@
  */
 
 import { createPage, cloneOperations, getEffectiveColorMode } from "./pageModel.js";
-import { getBasePageCanvas, updatePageThumbnail, applyOperationsToCanvas, clearBaseThumbnailCache } from "./thumbnailRenderer.js";
-import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection, forEachConcurrent, THUMBNAIL_CONCURRENCY } from "./tools.js";
+import { getBasePageCanvas, updatePageThumbnail, applyOperationsToCanvas, clearBaseThumbnailCache } from "./pageRenderer.js";
+import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection, forEachConcurrent, THUMBNAIL_CONCURRENCY } from "./pageCommands.js";
 import { savePdf } from "./saveManager.js";
 
 // DOM Elements
@@ -450,7 +450,7 @@ function updatePreviewAfterRender() {
 
 async function loadScribe() {
   if (scribeModule) return scribeModule;
-  const moduleUrl = new URL("./vendor/scribe.js", import.meta.url);
+  const moduleUrl = new URL("../vendor/scribe.js", import.meta.url);
   const module = await import(moduleUrl.href);
   scribeModule = module.default || module;
   return scribeModule;

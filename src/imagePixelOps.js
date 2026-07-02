@@ -8,9 +8,9 @@
  */
 
 import { OperationType, getEffectiveColorMode } from "./pageModel.js";
-import { encode as encodeCcittG4, binarizeToBitPacked } from "./vendor/ccitt-g4-encoder.mjs";
-import encodeMozJpeg from "./vendor/jsquash-jpeg/encode.js";
-import { deflate } from "./vendor/pako.mjs";
+import { encode as encodeCcittG4, binarizeToBitPacked } from "../vendor/ccitt-g4-encoder.mjs";
+import encodeMozJpeg from "../vendor/jsquash-jpeg/encode.js";
+import { deflate } from "../vendor/pako.mjs";
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
