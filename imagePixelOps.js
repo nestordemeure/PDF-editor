@@ -10,6 +10,7 @@
 import { OperationType, getEffectiveColorMode } from "./pageModel.js";
 import { encode as encodeCcittG4, binarizeToBitPacked } from "./vendor/ccitt-g4-encoder.mjs";
 import encodeMozJpeg from "./vendor/jsquash-jpeg/encode.js";
+import { deflate } from "./vendor/pako.mjs";
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -305,7 +306,9 @@ async function imageDataToBlobBytes(imageData, type, quality) {
  * Encodes a processed page image for embedding.
  * Returns { kind, ... } where kind is:
  * - "ccitt-g4": CCITT Group 4 compressed bilevel data in `raw`
- * - "raw-gray": raw DeviceGray samples (bitsPerComponent 1 or 8) in `raw`
+ * - "raw-gray": Flate-compressed DeviceGray samples (bitsPerComponent 1 or 8)
+ *   in `raw` (compressed here, in the worker, so full-resolution pages are
+ *   never held uncompressed)
  * - "png" / "jpeg": encoded bytes in `bytes`
  * `ocrBytes`/`ocrMime` hold an encoded image for the OCR engine when requested.
  */
@@ -321,14 +324,14 @@ export async function encodeProcessedImage(imageData, { colorMode, compression, 
       return { kind: "ccitt-g4", raw, width, height, ocrBytes, ocrMime: "image/png" };
     } catch (e) {
       // Fall back to packed 1-bit + Flate
-      const raw = packImageDataTo1Bit(imageData);
+      const raw = deflate(packImageDataTo1Bit(imageData));
       return { kind: "raw-gray", bitsPerComponent: 1, raw, width, height, ocrBytes, ocrMime: "image/png" };
     }
   }
 
   if (compression === "none") {
     if (colorMode === "gray") {
-      const raw = extractGray8(imageData);
+      const raw = deflate(extractGray8(imageData));
       const ocrBytes = needOcrImage ? await imageDataToBlobBytes(imageData, "image/png") : null;
       return { kind: "raw-gray", bitsPerComponent: 8, raw, width, height, ocrBytes, ocrMime: "image/png" };
     }

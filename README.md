@@ -29,6 +29,15 @@ cp node_modules/ts-ccitt-g4-encoder/LICENSE vendor/LICENSE-ts-ccitt-g4-encoder.t
 Grayscale and color pages are JPEG-compressed with MozJPEG via
 `@jsquash/jpeg` (Apache-2.0), vendored under `vendor/jsquash-jpeg/`. To update it:
 
+Raw DeviceGray streams are Flate-compressed with `pako` ((MIT AND Zlib)),
+vendored as `vendor/pako.mjs`. To update it:
+
+```bash
+npm install pako@latest
+cp node_modules/pako/dist/pako.mjs vendor/pako.mjs
+cp node_modules/pako/LICENSE vendor/LICENSE-pako.txt
+```
+
 ```bash
 npm install @jsquash/jpeg@latest
 cp node_modules/@jsquash/jpeg/{encode.js,meta.js,utils.js,LICENSE} vendor/jsquash-jpeg/

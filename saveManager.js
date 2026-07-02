@@ -13,6 +13,11 @@
 import { applyGeometricOpsToCanvas } from "./thumbnailRenderer.js";
 import { applyPixelPipeline, encodeProcessedImage } from "./imagePixelOps.js";
 import { getEffectiveColorMode } from "./pageModel.js";
+import { forEachConcurrent } from "./tools.js";
+
+// Pages rendered concurrently during save (PDF.js decode runs in parallel
+// across the striped documents; see app.js PDFJS_INSTANCES)
+const SAVE_RENDER_CONCURRENCY = 3;
 
 // Target DPI for compression levels
 const TARGET_DPI = {
@@ -92,19 +97,17 @@ async function drawRenderedImage(pdfDoc, pdfPage, rendered, { x = 0, y = 0, widt
       Height: rendered.height,
       ColorSpace: "DeviceGray",
     };
-    let contents;
     if (rendered.kind === "ccitt-g4") {
-      contents = rendered.raw;
       dict.BitsPerComponent = 1;
       dict.Filter = "CCITTFaxDecode";
       dict.DecodeParms = { K: -1, Columns: rendered.width, Rows: rendered.height, BlackIs1: false };
     } else {
-      contents = pako.deflate(rendered.raw);
+      // rendered.raw is already Flate-compressed by the encode step
       dict.BitsPerComponent = rendered.bitsPerComponent;
       dict.Filter = "FlateDecode";
     }
 
-    const stream = pdfDoc.context.stream(contents, dict);
+    const stream = pdfDoc.context.stream(rendered.raw, dict);
     const ref = pdfDoc.context.register(stream);
     const name = pdfPage.node.newXObject("Image", ref);
     pdfPage.pushOperators(
@@ -210,29 +213,20 @@ async function processPageInline({ pdfDoc, page, targetDpi, compression, jpegQua
 export async function renderAllPages({ pages, getPdfDocForPage, jpegQuality = 0.85, compression = "high", needOcrImage = false, onProgress, onStatus }) {
   const results = new Array(pages.length);
   const pool = createSaveWorkerPool();
-  const pending = []; // { index, promise } in dispatch order
+  let done = 0;
 
-  const settleOldest = async () => {
-    const { index, promise } = pending.shift();
-    results[index] = await promise; // marked { failed } on worker error
-  };
-
-  for (let i = 0; i < pages.length; i++) {
-    const page = pages[i];
+  const concurrency = pool ? SAVE_RENDER_CONCURRENCY : 1;
+  await forEachConcurrent(pages, concurrency, async (page, i) => {
     const pdfDoc = getPdfDocForPage ? await getPdfDocForPage(page) : null;
     if (!pdfDoc) {
       throw new Error("Missing PDF source for page rendering.");
     }
 
-    if (onStatus) onStatus(`Rendering page ${i + 1}/${pages.length}`);
-    if (onProgress) onProgress(i + 1, pages.length);
-
     const targetDpi = getTargetDpi(getEffectiveColorMode(page.operations), compression);
-    const params = { pdfDoc, page, targetDpi, compression, jpegQuality, needOcrImage };
 
     if (pool) {
       const imageData = await renderPageImageData(pdfDoc, page, targetDpi);
-      const promise = pool
+      results[i] = await pool
         .process({
           buffer: imageData.data.buffer,
           width: imageData.width,
@@ -244,19 +238,15 @@ export async function renderAllPages({ pages, getPdfDocForPage, jpegQuality = 0.
           needOcrImage,
         }, [imageData.data.buffer])
         .catch(() => ({ failed: true }));
-      pending.push({ index: i, promise });
-      if (pending.length >= pool.size) await settleOldest();
     } else {
-      results[i] = await processPageInline(params);
+      results[i] = await processPageInline({ pdfDoc, page, targetDpi, compression, jpegQuality, needOcrImage });
     }
 
+    done += 1;
+    if (onStatus) onStatus(`Rendering page ${done}/${pages.length}`);
+    if (onProgress) onProgress(done, pages.length);
     await yieldToUi();
-  }
-
-  while (pending.length) {
-    if (onStatus) onStatus("Encoding pages...");
-    await settleOldest();
-  }
+  });
   if (pool) pool.terminate();
 
   // Reprocess inline any pages whose worker failed
@@ -347,26 +337,28 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
   const pdfjsLib = window["pdfjs-dist/build/pdf"];
   const pdfDocCache = new Map();
 
+  // Resolves to the source's PDF.js documents (pages are striped across
+  // several instances so decoding parallelizes; see app.js)
+  const getPdfDocsForSource = (sourceId) => {
+    if (pdfDocCache.has(sourceId)) return pdfDocCache.get(sourceId);
+
+    const source = pdfSources.get ? pdfSources.get(sourceId) : pdfSources[sourceId];
+    let promise;
+    if (!source) promise = Promise.resolve(null);
+    else if (source.pdfDocs && source.pdfDocs.length) promise = Promise.resolve(source.pdfDocs);
+    else if (source.pdfDoc) promise = Promise.resolve([source.pdfDoc]);
+    else if (source.bytes) promise = pdfjsLib.getDocument({ data: source.bytes.slice(0) }).promise.then(doc => [doc]);
+    else promise = Promise.resolve(null);
+
+    pdfDocCache.set(sourceId, promise);
+    return promise;
+  };
+
   const getPdfDocForPage = async (page) => {
     if (!page || !page.sourceId || !pdfSources) return null;
-    if (pdfDocCache.has(page.sourceId)) {
-      return await pdfDocCache.get(page.sourceId);
-    }
-
-    const source = pdfSources.get ? pdfSources.get(page.sourceId) : pdfSources[page.sourceId];
-    if (!source) return null;
-    if (source.pdfDoc) {
-      pdfDocCache.set(page.sourceId, source.pdfDoc);
-      return source.pdfDoc;
-    }
-    if (!source.bytes) return null;
-
-    const loadingTask = pdfjsLib.getDocument({ data: source.bytes.slice(0) });
-    const promise = loadingTask.promise;
-    pdfDocCache.set(page.sourceId, promise);
-    const pdfDoc = await promise;
-    pdfDocCache.set(page.sourceId, pdfDoc);
-    return pdfDoc;
+    const pdfDocs = await getPdfDocsForSource(page.sourceId);
+    if (!pdfDocs || pdfDocs.length === 0) return null;
+    return pdfDocs[page.sourcePageIndex % pdfDocs.length];
   };
 
   const jpegQuality = compression === "low" ? 0.75 : compression === "medium" ? 0.60 : compression === "high" ? 0.50 : 0.85;

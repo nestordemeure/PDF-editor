@@ -20,6 +20,7 @@
   "homepage": "https://github.com/nestordemeure/PDF-editor#readme",
   "dependencies": {
     "@jsquash/jpeg": "^1.6.0",
+    "pako": "^3.0.0",
     "scribe.js-ocr": "^0.9.3",
     "ts-ccitt-g4-encoder": "^1.0.0"
   }
