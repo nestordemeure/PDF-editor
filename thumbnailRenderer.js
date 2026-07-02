@@ -1,8 +1,10 @@
 /**
- * Thumbnail renderer for low-resolution page previews.
+ * Page rendering pipeline, shared by thumbnails and the exporter.
  *
- * Generates small thumbnails from PDF pages with operations applied.
- * Thumbnails are used for the page grid display and preview panel.
+ * applyOperationsToCanvas is the single canonical pipeline:
+ * geometric ops (rotate/split) -> remove shading -> enhance contrast -> color mode.
+ * Binarization runs last so shading removal / contrast work on real gray values.
+ * Because thumbnails and the save path use the same pipeline, previews match output.
  */
 
 import { applyModeToCanvas, removeShading, enhanceContrast } from "./imageColorModes.js";
@@ -12,18 +14,13 @@ import { OperationType, getEffectiveColorMode } from "./pageModel.js";
 const THUMBNAIL_WIDTH = 300;
 
 /**
- * Renders a PDF page to a thumbnail canvas
- * @param {Object} params
- * @param {Object} params.pdfDoc - PDF.js document
- * @param {number} params.pageIndex - Page index (0-based)
- * @param {number} params.maxWidth - Maximum thumbnail width
+ * Renders a PDF page to a canvas sized to fit maxWidth
  * @returns {Promise<{canvas: HTMLCanvasElement, pageSizePts: {width: number, height: number}}>}
  */
 export async function renderPdfPageThumbnail({ pdfDoc, pageIndex, maxWidth = THUMBNAIL_WIDTH }) {
   const page = await pdfDoc.getPage(pageIndex + 1); // PDF.js uses 1-based indexing
   const viewport = page.getViewport({ scale: 1 });
 
-  // Calculate scale to fit within maxWidth
   const scale = maxWidth / viewport.width;
   const scaledViewport = page.getViewport({ scale });
 
@@ -40,10 +37,15 @@ export async function renderPdfPageThumbnail({ pdfDoc, pageIndex, maxWidth = THU
   };
 }
 
+function releaseCanvas(canvas) {
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
 /**
  * Rotates a canvas by 90 degrees clockwise
  */
-function rotateCanvas90(canvas) {
+export function rotateCanvas90(canvas) {
   const rotated = document.createElement("canvas");
   rotated.width = canvas.height;
   rotated.height = canvas.width;
@@ -57,7 +59,7 @@ function rotateCanvas90(canvas) {
 /**
  * Crops a canvas to left or right half
  */
-function cropCanvasHalf(canvas, side) {
+export function cropCanvasHalf(canvas, side) {
   const mid = Math.floor(canvas.width / 2);
   const cropped = document.createElement("canvas");
 
@@ -75,43 +77,45 @@ function cropCanvasHalf(canvas, side) {
 }
 
 /**
- * Applies operations to a thumbnail canvas
- * @param {HTMLCanvasElement} canvas - Source canvas (will be modified or replaced)
- * @param {Array} operations - List of operations to apply
- * @returns {HTMLCanvasElement} - Result canvas (may be different from input)
+ * Applies a page's operations to a canvas. Consumes the input canvas
+ * (intermediates are released); returns the resulting canvas.
+ * @param {HTMLCanvasElement} canvas - Source canvas (treated as owned/throwaway)
+ * @param {Array} operations - Operations to apply
+ * @param {Object} [options]
+ * @param {number} [options.shadingScale] - Resolution scale for shading removal
+ *   (canvas resolution relative to a 300 DPI render of the page)
+ * @returns {HTMLCanvasElement}
  */
-export function applyOperationsToThumbnail(canvas, operations) {
+export function applyOperationsToCanvas(canvas, operations, { shadingScale = 1 } = {}) {
   let current = canvas;
 
-  // First pass: apply geometric operations (rotate, split)
+  // Geometric operations, in the order they were applied
   for (const op of operations) {
     if (op.type === OperationType.ROTATE) {
       const times = ((op.degrees / 90) % 4 + 4) % 4;
       for (let i = 0; i < times; i++) {
-        current = rotateCanvas90(current);
+        const rotated = rotateCanvas90(current);
+        releaseCanvas(current);
+        current = rotated;
       }
     } else if (op.type === OperationType.SPLIT) {
-      current = cropCanvasHalf(current, op.side);
+      const cropped = cropCanvasHalf(current, op.side);
+      releaseCanvas(current);
+      current = cropped;
     }
   }
 
-  // Second pass: apply pixel operations
-  // Find the last color mode operation
+  // Pixel operations: shading and contrast must run before binarization
+  if (operations.some(op => op.type === OperationType.REMOVE_SHADING)) {
+    removeShading(current, shadingScale);
+  }
+  if (operations.some(op => op.type === OperationType.ENHANCE_CONTRAST)) {
+    enhanceContrast(current);
+  }
+
   const colorMode = getEffectiveColorMode(operations);
   if (colorMode !== "color") {
-    current = applyModeToCanvas(colorMode, current);
-  }
-
-  // Apply shading removal if present
-  const hasRemoveShading = operations.some(op => op.type === OperationType.REMOVE_SHADING);
-  if (hasRemoveShading) {
-    removeShading(current);
-  }
-
-  // Apply contrast enhancement if present
-  const hasEnhanceContrast = operations.some(op => op.type === OperationType.ENHANCE_CONTRAST);
-  if (hasEnhanceContrast) {
-    enhanceContrast(current);
+    applyModeToCanvas(colorMode, current);
   }
 
   return current;
@@ -119,46 +123,22 @@ export function applyOperationsToThumbnail(canvas, operations) {
 
 /**
  * Generates a thumbnail for a page with its operations applied
- * @param {Object} params
- * @param {Object} params.pdfDoc - PDF.js document
- * @param {Object} params.page - Page object from pageModel
- * @param {number} params.maxWidth - Maximum thumbnail width
- * @returns {Promise<HTMLCanvasElement>}
  */
 export async function generateThumbnail({ pdfDoc, page, maxWidth = THUMBNAIL_WIDTH }) {
-  const { canvas } = await renderPdfPageThumbnail({
+  const { canvas, pageSizePts } = await renderPdfPageThumbnail({
     pdfDoc,
     pageIndex: page.sourcePageIndex,
     maxWidth,
   });
 
-  return applyOperationsToThumbnail(canvas, page.operations);
+  // Thumbnail resolution relative to a 300 DPI render of the source page
+  const shadingScale = canvas.width / ((pageSizePts.width / 72) * 300);
+  return applyOperationsToCanvas(canvas, page.operations, { shadingScale });
 }
 
 /**
- * Updates a page's thumbnail after operations change
- * @param {Object} params
- * @param {Object} params.pdfDoc - PDF.js document
- * @param {Object} params.page - Page object (will be mutated)
- * @param {number} params.maxWidth - Maximum thumbnail width
+ * Updates a page's thumbnail after operations change (mutates page.thumbnail)
  */
 export async function updatePageThumbnail({ pdfDoc, page, maxWidth = THUMBNAIL_WIDTH }) {
   page.thumbnail = await generateThumbnail({ pdfDoc, page, maxWidth });
-}
-
-/**
- * Batch update thumbnails for multiple pages
- * @param {Object} params
- * @param {Object} params.pdfDoc - PDF.js document
- * @param {Array} params.pages - Array of page objects
- * @param {Function} params.onProgress - Progress callback (index, total)
- * @param {number} params.maxWidth - Maximum thumbnail width
- */
-export async function updateThumbnailsBatch({ pdfDoc, pages, onProgress, maxWidth = THUMBNAIL_WIDTH }) {
-  for (let i = 0; i < pages.length; i++) {
-    await updatePageThumbnail({ pdfDoc, page: pages[i], maxWidth });
-    if (onProgress) {
-      onProgress(i + 1, pages.length);
-    }
-  }
 }

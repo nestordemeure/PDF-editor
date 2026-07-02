@@ -1,15 +1,17 @@
 /**
  * Save manager for orchestrating the PDF save process.
  *
- * Processes pages in batches to control memory usage.
- * PDF rendering happens in main thread (where PDF.js works),
- * but we process and release pages in batches to avoid memory issues.
+ * Pages are rendered at the target DPI, run through the shared operation
+ * pipeline (same one used for thumbnails), then embedded as compactly as
+ * possible:
+ * - B&W pages: raw 1-bit DeviceGray + FlateDecode (packed bits, ~24x smaller
+ *   than letting pdf-lib re-expand a PNG to 24-bit RGB).
+ * - Grayscale, "No Compression": raw 8-bit DeviceGray + FlateDecode (lossless).
+ * - Color, "No Compression": lossless PNG.
+ * - Everything else: JPEG at a quality matching the compression level.
  */
 
-import { applyModeToCanvas, removeShading, enhanceContrast } from "./imageColorModes.js";
-
-// Batch size for memory control
-const BATCH_SIZE = 4;
+import { applyOperationsToCanvas } from "./thumbnailRenderer.js";
 
 // Target DPI for compression levels
 const TARGET_DPI = {
@@ -30,11 +32,15 @@ function getColorMode(operations) {
   return "color";
 }
 
+function isBwMode(mode) {
+  return mode === "bw" || mode === "bw-otsu";
+}
+
 /**
  * Gets target DPI based on mode and compression
  */
 function getTargetDpi(mode, compression) {
-  const modeKey = (mode === "bw" || mode === "bw-otsu") ? "bw" : (mode === "gray" ? "gray" : "color");
+  const modeKey = isBwMode(mode) ? "bw" : (mode === "gray" ? "gray" : "color");
   const dpiTable = TARGET_DPI[modeKey] || TARGET_DPI.gray;
   return dpiTable[compression] || dpiTable.medium;
 }
@@ -44,9 +50,6 @@ function getTargetDpi(mode, compression) {
  */
 async function renderPdfPage(pdfDoc, pageIndex, dpi = 300) {
   const page = await pdfDoc.getPage(pageIndex + 1);
-  const viewport = page.getViewport({ scale: 1 });
-
-  // Render at specified DPI
   const scale = dpi / 72;
   const scaledViewport = page.getViewport({ scale });
 
@@ -58,158 +61,6 @@ async function renderPdfPage(pdfDoc, pageIndex, dpi = 300) {
   await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise;
 
   return canvas;
-}
-
-/**
- * Rotates a canvas 90 degrees clockwise
- */
-function rotateCanvas90(canvas) {
-  const rotated = document.createElement("canvas");
-  rotated.width = canvas.height;
-  rotated.height = canvas.width;
-  const ctx = rotated.getContext("2d");
-  ctx.translate(rotated.width, 0);
-  ctx.rotate(Math.PI / 2);
-  ctx.drawImage(canvas, 0, 0);
-  return rotated;
-}
-
-/**
- * Crops a canvas to left or right half
- */
-function cropCanvasHalf(canvas, side) {
-  const mid = Math.floor(canvas.width / 2);
-  const cropped = document.createElement("canvas");
-
-  if (side === "left") {
-    cropped.width = mid;
-    cropped.height = canvas.height;
-    cropped.getContext("2d").drawImage(canvas, 0, 0, mid, canvas.height, 0, 0, mid, canvas.height);
-  } else {
-    cropped.width = canvas.width - mid;
-    cropped.height = canvas.height;
-    cropped.getContext("2d").drawImage(canvas, mid, 0, canvas.width - mid, canvas.height, 0, 0, canvas.width - mid, canvas.height);
-  }
-
-  return cropped;
-}
-
-/**
- * Applies all operations to a full-resolution canvas
- */
-function applyOperationsToCanvas(canvas, operations) {
-  let current = canvas;
-
-  for (const op of operations) {
-    if (op.type === "rotate") {
-      const times = ((op.degrees / 90) % 4 + 4) % 4;
-      for (let i = 0; i < times; i++) {
-        const rotated = rotateCanvas90(current);
-        releaseCanvas(current);
-        current = rotated;
-      }
-    } else if (op.type === "split") {
-      const cropped = cropCanvasHalf(current, op.side);
-      releaseCanvas(current);
-      current = cropped;
-    }
-  }
-
-  // Apply color mode
-  let colorMode = "color";
-  for (let i = operations.length - 1; i >= 0; i--) {
-    if (operations[i].type === "colorMode") {
-      colorMode = operations[i].mode;
-      break;
-    }
-  }
-
-  if (colorMode !== "color") {
-    const prev = current;
-    current = applyModeToCanvas(colorMode, current);
-    releaseCanvas(prev);
-  }
-
-  // Apply shading removal
-  if (operations.some(op => op.type === "removeShading")) {
-    removeShading(current);
-  }
-
-  // Apply contrast enhancement
-  if (operations.some(op => op.type === "enhanceContrast")) {
-    enhanceContrast(current);
-  }
-
-  return current;
-}
-
-/**
- * Converts canvas to image bytes
- * Uses 1-bit PNG for B&W (extremely efficient), JPEG for color/grayscale
- */
-async function canvasToImageBytes(canvas, format, quality, colorMode) {
-  // For B&W, use 1-bit PNG (extremely efficient - 1 bit per pixel)
-  if (colorMode === "bw" || colorMode === "bw-otsu") {
-    const ctx = canvas.getContext("2d");
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imgData.data;
-
-    const rowBytes = Math.ceil(canvas.width / 8);
-    const packed = new Uint8Array(rowBytes * canvas.height);
-    let out = 0;
-    for (let y = 0; y < canvas.height; y++) {
-      let byte = 0;
-      let bit = 7;
-      for (let x = 0; x < canvas.width; x++) {
-        const i = (y * canvas.width + x) * 4;
-        const v = data[i] > 127 ? 1 : 0;
-        byte |= v << bit;
-        bit--;
-        if (bit < 0) {
-          packed[out++] = byte;
-          byte = 0;
-          bit = 7;
-        }
-      }
-      if (bit !== 7) packed[out++] = byte;
-    }
-
-    // Use UPNG for 1-bit PNG
-    if (typeof UPNG !== "undefined") {
-      if (typeof UPNG.encodeLL === "function") {
-        try {
-          const encoded = UPNG.encodeLL([packed.buffer], canvas.width, canvas.height, 1, 0, 1);
-          return { bytes: new Uint8Array(encoded), mimeType: "image/png" };
-        } catch (e) {
-          // Fall through to 8-bit PNG fallback
-        }
-      }
-      try {
-        const encoded = UPNG.encode([imgData.data.buffer], canvas.width, canvas.height, 0);
-        return { bytes: new Uint8Array(encoded), mimeType: "image/png" };
-      } catch (e) {
-        // Fall through to JPEG
-      }
-    }
-  }
-
-  // For color and grayscale, use JPEG (lossy compression works well for scanned content)
-  return new Promise((resolve) => {
-    canvas.toBlob(async (blob) => {
-      if (!blob) {
-        const dataUrl = canvas.toDataURL("image/jpeg", quality);
-        const response = await fetch(dataUrl);
-        const arrayBuffer = await response.arrayBuffer();
-        resolve({ bytes: new Uint8Array(arrayBuffer), mimeType: "image/jpeg" });
-        return;
-      }
-      const arrayBuffer = await blob.arrayBuffer();
-      resolve({
-        bytes: new Uint8Array(arrayBuffer),
-        mimeType: "image/jpeg",
-      });
-    }, "image/jpeg", quality);
-  });
 }
 
 /**
@@ -227,6 +78,7 @@ function releaseCanvas(canvas) {
  */
 function yieldToUi() {
   if (document.hidden) {
+    // MessageChannel is not throttled in background tabs (unlike rAF which is paused)
     return new Promise(resolve => {
       const mc = new MessageChannel();
       mc.port1.onmessage = () => resolve();
@@ -236,10 +88,132 @@ function yieldToUi() {
   return new Promise(resolve => requestAnimationFrame(() => resolve()));
 }
 
+function canvasToBlobBytes(canvas, mimeType, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (!blob) {
+        reject(new Error(`Canvas encoding to ${mimeType} failed.`));
+        return;
+      }
+      blob.arrayBuffer().then(buffer => resolve(new Uint8Array(buffer)), reject);
+    }, mimeType, quality);
+  });
+}
+
 /**
- * Renders all pages in batches and returns image data
+ * Packs a binarized canvas into 1 bit per pixel (rows byte-aligned, 1 = white)
  */
-export async function renderAllPages({ pages, getPdfDocForPage, outputFormat = "png", jpegQuality = 0.85, compression = "high", onProgress, onStatus }) {
+function packCanvasTo1Bit(canvas) {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+
+  const rowBytes = Math.ceil(canvas.width / 8);
+  const packed = new Uint8Array(rowBytes * canvas.height);
+  for (let y = 0; y < canvas.height; y++) {
+    const rowOffset = y * rowBytes;
+    for (let x = 0; x < canvas.width; x++) {
+      if (data[(y * canvas.width + x) * 4] > 127) {
+        packed[rowOffset + (x >> 3)] |= 0x80 >> (x & 7);
+      }
+    }
+  }
+  return packed;
+}
+
+/**
+ * Extracts the 8-bit grayscale channel from a canvas
+ */
+function extractGray8(canvas) {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  const gray = new Uint8Array(canvas.width * canvas.height);
+  for (let i = 0; i < gray.length; i++) {
+    const idx = i * 4;
+    gray[i] = (0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]) | 0;
+  }
+  return gray;
+}
+
+/**
+ * Encodes a processed canvas for embedding.
+ * Returns { kind, ... } where kind is:
+ * - "raw-gray": raw DeviceGray samples (bitsPerComponent 1 or 8) in `raw`
+ * - "png" / "jpeg": encoded bytes in `bytes`
+ * `ocrBytes`/`ocrMime` hold an encoded image for the OCR engine when requested.
+ */
+async function encodeCanvas(canvas, { compression, jpegQuality, colorMode, needOcrImage }) {
+  const width = canvas.width;
+  const height = canvas.height;
+
+  if (isBwMode(colorMode)) {
+    const packed = packCanvasTo1Bit(canvas);
+    let ocrBytes = null;
+    if (needOcrImage) {
+      // 1-bit grayscale PNG via UPNG (tiny); fall back to canvas PNG
+      if (typeof UPNG !== "undefined" && typeof UPNG.encodeLL === "function") {
+        try {
+          ocrBytes = new Uint8Array(UPNG.encodeLL([packed.buffer], width, height, 1, 0, 1));
+        } catch (e) {
+          ocrBytes = null;
+        }
+      }
+      if (!ocrBytes) ocrBytes = await canvasToBlobBytes(canvas, "image/png");
+    }
+    return { kind: "raw-gray", bitsPerComponent: 1, raw: packed, width, height, ocrBytes, ocrMime: "image/png" };
+  }
+
+  if (compression === "none") {
+    if (colorMode === "gray") {
+      const raw = extractGray8(canvas);
+      const ocrBytes = needOcrImage ? await canvasToBlobBytes(canvas, "image/png") : null;
+      return { kind: "raw-gray", bitsPerComponent: 8, raw, width, height, ocrBytes, ocrMime: "image/png" };
+    }
+    const bytes = await canvasToBlobBytes(canvas, "image/png");
+    return { kind: "png", bytes, width, height, ocrBytes: bytes, ocrMime: "image/png" };
+  }
+
+  const bytes = await canvasToBlobBytes(canvas, "image/jpeg", jpegQuality);
+  return { kind: "jpeg", bytes, width, height, ocrBytes: bytes, ocrMime: "image/jpeg" };
+}
+
+/**
+ * Embeds a rendered page image into the document and draws it on pdfPage
+ * in the rectangle {x, y, width, height} (page coordinate space).
+ */
+async function drawRenderedImage(pdfDoc, pdfPage, rendered, { x = 0, y = 0, width, height }) {
+  if (rendered.kind === "raw-gray") {
+    const { pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject } = window.PDFLib;
+    const compressed = pako.deflate(rendered.raw);
+    const stream = pdfDoc.context.stream(compressed, {
+      Type: "XObject",
+      Subtype: "Image",
+      Width: rendered.width,
+      Height: rendered.height,
+      ColorSpace: "DeviceGray",
+      BitsPerComponent: rendered.bitsPerComponent,
+      Filter: "FlateDecode",
+    });
+    const ref = pdfDoc.context.register(stream);
+    const name = pdfPage.node.newXObject("Image", ref);
+    pdfPage.pushOperators(
+      pushGraphicsState(),
+      concatTransformationMatrix(width, 0, 0, height, x, y),
+      drawObject(name),
+      popGraphicsState(),
+    );
+    return;
+  }
+
+  const image = rendered.kind === "jpeg"
+    ? await pdfDoc.embedJpg(rendered.bytes)
+    : await pdfDoc.embedPng(rendered.bytes);
+  pdfPage.drawImage(image, { x, y, width, height });
+}
+
+/**
+ * Renders all pages through the shared pipeline and encodes them
+ */
+export async function renderAllPages({ pages, getPdfDocForPage, jpegQuality = 0.85, compression = "high", needOcrImage = false, onProgress, onStatus }) {
   const results = [];
 
   for (let i = 0; i < pages.length; i++) {
@@ -252,35 +226,20 @@ export async function renderAllPages({ pages, getPdfDocForPage, outputFormat = "
     if (onStatus) onStatus(`Rendering page ${i + 1}/${pages.length}`);
     if (onProgress) onProgress(i + 1, pages.length);
 
-    // Determine color mode and target DPI
     const colorMode = getColorMode(page.operations);
     const targetDpi = getTargetDpi(colorMode, compression);
 
-    // Render from PDF at target DPI (already downscaled for compression)
+    // Render at target DPI (already downscaled for compression), then apply
+    // operations with the same pipeline the thumbnails use
     let canvas = await renderPdfPage(pdfDoc, page.sourcePageIndex, targetDpi);
+    canvas = applyOperationsToCanvas(canvas, page.operations, { shadingScale: targetDpi / 300 });
 
-    // Apply operations
-    canvas = applyOperationsToCanvas(canvas, page.operations);
+    const rendered = await encodeCanvas(canvas, { compression, jpegQuality, colorMode, needOcrImage });
+    rendered.pageSizePts = { ...page.pageSizePts };
+    results.push(rendered);
 
-    // Convert to image bytes (pass colorMode for optimal encoding)
-    const { bytes, mimeType } = await canvasToImageBytes(canvas, outputFormat, jpegQuality, colorMode);
-
-    // page.pageSizePts is already adjusted for operations (split, rotate) in tools.js
-    results.push({
-      bytes,
-      mimeType,
-      width: canvas.width,
-      height: canvas.height,
-      pageSizePts: { ...page.pageSizePts },
-    });
-
-    // Release memory
     releaseCanvas(canvas);
-
-    // Yield to UI periodically
-    if (i % BATCH_SIZE === 0) {
-      await yieldToUi();
-    }
+    await yieldToUi();
   }
 
   return results;
@@ -324,8 +283,9 @@ export async function runOcr({ renderedPages, lang, onProgress, onStatus, scribe
 
     // Convert to File objects for scribe.js
     const imageFiles = renderedPages.map((page, index) => {
-      const blob = new Blob([page.bytes], { type: page.mimeType });
-      return new File([blob], `page_${String(index + 1).padStart(4, "0")}.png`, { type: page.mimeType });
+      const blob = new Blob([page.ocrBytes], { type: page.ocrMime });
+      const extension = page.ocrMime === "image/jpeg" ? "jpg" : "png";
+      return new File([blob], `page_${String(index + 1).padStart(4, "0")}.${extension}`, { type: page.ocrMime });
     });
 
     await scribeModule.importFiles({ imageFiles });
@@ -377,18 +337,17 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
     return pdfDoc;
   };
 
-  // Determine output format
-  const outputFormat = compression === "none" ? "png" : "jpeg";
   const jpegQuality = compression === "low" ? 0.75 : compression === "medium" ? 0.60 : compression === "high" ? 0.50 : 0.85;
+  const wantOcr = Boolean(ocrLang && ocrLang !== "none" && scribeModule);
 
   // Phase 1: Render all pages
   if (onStatus) onStatus("Rendering pages...");
   const renderedPages = await renderAllPages({
     pages,
     getPdfDocForPage,
-    outputFormat,
     jpegQuality,
     compression,
+    needOcrImage: wantOcr,
     onProgress,
     onStatus,
   });
@@ -397,7 +356,7 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
   let finalPdfBytes;
 
   // Phase 2: OCR (if enabled)
-  if (ocrLang && ocrLang !== "none" && scribeModule) {
+  if (wantOcr) {
     if (onStatus) onStatus("Running OCR...");
 
     const ocrPdfBytes = await runOcr({
@@ -430,19 +389,16 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
         pdfPage.scaleContent(targetW / ocrW, targetH / ocrH);
         pdfPage.setSize(targetW, targetH);
 
-        const image = rendered.mimeType === "image/jpeg"
-          ? await ocrPdfDoc.embedJpg(rendered.bytes)
-          : await ocrPdfDoc.embedPng(rendered.bytes);
-
-        // Compensate drawImage dimensions for the active scale transform
-        pdfPage.drawImage(image, {
+        // Content drawn after scaleContent shares its transform, so draw at
+        // the OCR page's original size to end up filling the target page
+        await drawRenderedImage(ocrPdfDoc, pdfPage, rendered, {
           x: 0,
           y: 0,
           width: ocrW,
           height: ocrH,
         });
 
-        if (i % BATCH_SIZE === 0) await yieldToUi();
+        await yieldToUi();
       }
 
       if (onStatus) onStatus("Finalizing PDF...");
@@ -462,20 +418,15 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
       if (onStatus) onStatus(`Adding page ${i + 1}/${renderedPages.length}`);
 
       const rendered = renderedPages[i];
-
-      const image = rendered.mimeType === "image/jpeg"
-        ? await outputPdf.embedJpg(rendered.bytes)
-        : await outputPdf.embedPng(rendered.bytes);
-
       const pdfPage = outputPdf.addPage([rendered.pageSizePts.width, rendered.pageSizePts.height]);
-      pdfPage.drawImage(image, {
+      await drawRenderedImage(outputPdf, pdfPage, rendered, {
         x: 0,
         y: 0,
         width: rendered.pageSizePts.width,
         height: rendered.pageSizePts.height,
       });
 
-      if (i % BATCH_SIZE === 0) await yieldToUi();
+      await yieldToUi();
     }
 
     if (onStatus) onStatus("Finalizing PDF...");
@@ -484,4 +435,3 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
 
   return { pdfBytes: finalPdfBytes, ocrUsed };
 }
-

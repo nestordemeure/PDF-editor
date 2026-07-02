@@ -9,7 +9,7 @@
  */
 
 import { createPage, cloneOperations, getEffectiveColorMode } from "./pageModel.js";
-import { renderPdfPageThumbnail, updatePageThumbnail } from "./thumbnailRenderer.js";
+import { renderPdfPageThumbnail, updatePageThumbnail, applyOperationsToCanvas } from "./thumbnailRenderer.js";
 import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection } from "./tools.js";
 import { savePdf } from "./saveManager.js";
 
@@ -40,19 +40,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dis
 
 // pdf-lib
 const { PDFDocument } = window.PDFLib;
-
-// OpenCV initialization (used for B&W modes in thumbnails)
-window.cvReady = false;
-window.onOpenCvReady = () => {
-  if (!window.cv) return;
-  if (window.cv.Mat) {
-    window.cvReady = true;
-    return;
-  }
-  window.cv.onRuntimeInitialized = () => {
-    window.cvReady = true;
-  };
-};
 
 // State
 let pages = [];
@@ -449,14 +436,13 @@ async function handleFiles(files) {
           sourceId: source.sourceId,
           sourcePageIndex: i,
           pageSizePts,
-          thumbnail,
+          thumbnail: null,
         });
 
-        // Apply default grayscale mode
+        // Apply default grayscale mode to the already-rendered canvas
+        // (avoids rendering every page twice on load)
         page.operations.push({ type: "colorMode", mode: "gray" });
-
-        // Update thumbnail to show grayscale
-        await updatePageThumbnail({ pdfDoc: source.pdfDoc, page });
+        page.thumbnail = applyOperationsToCanvas(thumbnail, page.operations);
 
         newPages.push(page);
         await yieldToUi();
@@ -556,7 +542,7 @@ removeShadingBtn.addEventListener("click", async () => {
   setProgress(0, selected.length);
   setStatus(`Removing shading from ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await removeShadingSelection({ pages, setProgress, setStatus, yieldToUi });
+  await removeShadingSelection({ pages, getPdfDocForPage, setProgress, setStatus, yieldToUi });
 
   renderPages();
   endProgress();
@@ -571,7 +557,7 @@ enhanceContrastBtn.addEventListener("click", async () => {
   setProgress(0, selected.length);
   setStatus(`Enhancing contrast for ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await enhanceContrastSelection({ pages, setProgress, setStatus, yieldToUi });
+  await enhanceContrastSelection({ pages, getPdfDocForPage, setProgress, setStatus, yieldToUi });
 
   renderPages();
   endProgress();
@@ -615,8 +601,9 @@ redoBtn.addEventListener("click", async () => {
 });
 
 saveBtn.addEventListener("click", async () => {
-  if (pages.length === 0 || sourcePdfs.size === 0) return;
+  if (pages.length === 0 || sourcePdfs.size === 0 || saveBtn.disabled) return;
 
+  saveBtn.disabled = true;
   setStatus("Preparing to save...");
   setProgress(0, 1);
 
@@ -663,6 +650,8 @@ saveBtn.addEventListener("click", async () => {
     console.error("Save failed:", error);
     setStatus(`Save failed: ${error.message}`);
     endProgress();
+  } finally {
+    saveBtn.disabled = false;
   }
 });
 
