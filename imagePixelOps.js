@@ -8,6 +8,7 @@
  */
 
 import { OperationType, getEffectiveColorMode } from "./pageModel.js";
+import { encode as encodeCcittG4, binarizeToBitPacked } from "./vendor/ccitt-g4-encoder.mjs";
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -302,6 +303,7 @@ async function imageDataToBlobBytes(imageData, type, quality) {
 /**
  * Encodes a processed page image for embedding.
  * Returns { kind, ... } where kind is:
+ * - "ccitt-g4": CCITT Group 4 compressed bilevel data in `raw`
  * - "raw-gray": raw DeviceGray samples (bitsPerComponent 1 or 8) in `raw`
  * - "png" / "jpeg": encoded bytes in `bytes`
  * `ocrBytes`/`ocrMime` hold an encoded image for the OCR engine when requested.
@@ -311,9 +313,16 @@ export async function encodeProcessedImage(imageData, { colorMode, compression, 
   const height = imageData.height;
 
   if (isBwMode(colorMode)) {
-    const raw = packImageDataTo1Bit(imageData);
     const ocrBytes = needOcrImage ? await imageDataToBlobBytes(imageData, "image/png") : null;
-    return { kind: "raw-gray", bitsPerComponent: 1, raw, width, height, ocrBytes, ocrMime: "image/png" };
+    try {
+      // CCITT G4 compresses bilevel scans far better than Flate
+      const raw = encodeCcittG4(binarizeToBitPacked(imageData, 128), width, height);
+      return { kind: "ccitt-g4", raw, width, height, ocrBytes, ocrMime: "image/png" };
+    } catch (e) {
+      // Fall back to packed 1-bit + Flate
+      const raw = packImageDataTo1Bit(imageData);
+      return { kind: "raw-gray", bitsPerComponent: 1, raw, width, height, ocrBytes, ocrMime: "image/png" };
+    }
   }
 
   if (compression === "none") {

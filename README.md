@@ -17,6 +17,15 @@ OCR is optional at export time and uses Scribe.js from `vendor/scribe.js`.
 Scribe.js is AGPL-3.0 licensed; see `vendor/LICENSE-scribe.js-ocr.txt` for attribution.
 To update the vendored file:
 
+B&W pages are compressed with CCITT G4 via `ts-ccitt-g4-encoder` (MIT),
+vendored as `vendor/ccitt-g4-encoder.mjs`. To update it:
+
+```bash
+npm install ts-ccitt-g4-encoder@latest
+cp node_modules/ts-ccitt-g4-encoder/dist/index.mjs vendor/ccitt-g4-encoder.mjs
+cp node_modules/ts-ccitt-g4-encoder/LICENSE vendor/LICENSE-ts-ccitt-g4-encoder.txt
+```
+
 ```bash
 npm install scribe.js-ocr@latest
 cp node_modules/scribe.js-ocr/scribe.js vendor/scribe.js

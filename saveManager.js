@@ -83,18 +83,29 @@ function yieldToUi() {
  * in the rectangle {x, y, width, height} (page coordinate space).
  */
 async function drawRenderedImage(pdfDoc, pdfPage, rendered, { x = 0, y = 0, width, height }) {
-  if (rendered.kind === "raw-gray") {
+  if (rendered.kind === "ccitt-g4" || rendered.kind === "raw-gray") {
     const { pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject } = window.PDFLib;
-    const compressed = pako.deflate(rendered.raw);
-    const stream = pdfDoc.context.stream(compressed, {
+
+    const dict = {
       Type: "XObject",
       Subtype: "Image",
       Width: rendered.width,
       Height: rendered.height,
       ColorSpace: "DeviceGray",
-      BitsPerComponent: rendered.bitsPerComponent,
-      Filter: "FlateDecode",
-    });
+    };
+    let contents;
+    if (rendered.kind === "ccitt-g4") {
+      contents = rendered.raw;
+      dict.BitsPerComponent = 1;
+      dict.Filter = "CCITTFaxDecode";
+      dict.DecodeParms = { K: -1, Columns: rendered.width, Rows: rendered.height, BlackIs1: false };
+    } else {
+      contents = pako.deflate(rendered.raw);
+      dict.BitsPerComponent = rendered.bitsPerComponent;
+      dict.Filter = "FlateDecode";
+    }
+
+    const stream = pdfDoc.context.stream(contents, dict);
     const ref = pdfDoc.context.register(stream);
     const name = pdfPage.node.newXObject("Image", ref);
     pdfPage.pushOperators(
