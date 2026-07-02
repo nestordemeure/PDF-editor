@@ -144,6 +144,26 @@
     </div>
   </section>
 
+  <!-- Choice dialog shown when a loaded PDF contains typeset text pages -->
+  <dialog id="textPagesDialog" class="text-pages-dialog">
+    <h3 class="title is-6 mb-2">This PDF contains text</h3>
+    <p id="textPagesMessage" class="is-size-7 mb-3"></p>
+    <div class="dialog-choices">
+      <button class="dialog-choice" data-choice="keep">
+        <strong>Keep the text</strong>
+        <small>Pages are saved as-is: text, fonts and quality preserved; embedded images still compressed. Best for born-digital PDFs.</small>
+      </button>
+      <button class="dialog-choice" data-choice="strip">
+        <strong>Strip the text</strong>
+        <small>All text is permanently removed; images and graphics keep their original quality (no re-OCR). Best for deleting a junk OCR layer.</small>
+      </button>
+      <button class="dialog-choice" data-choice="rasterize">
+        <strong>Rasterize</strong>
+        <small>Pages are converted to images and treated like scans: cleanup, recompression, and fresh OCR if enabled. Best when you do not want a vector output.</small>
+      </button>
+    </div>
+  </dialog>
+
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
   <script type="module" src="src/app.js"></script>

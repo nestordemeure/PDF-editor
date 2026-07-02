@@ -109,6 +109,50 @@ body {
   color: #2559a7;
 }
 
+.text-pages-dialog {
+  border: 1px solid #e2dcd3;
+  border-radius: 8px;
+  padding: 20px;
+  max-width: 420px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+}
+
+.text-pages-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.dialog-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dialog-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid #dbd5cc;
+  border-radius: 6px;
+  background: #fafafa;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+}
+
+.dialog-choice:hover,
+.dialog-choice:focus-visible {
+  border-color: #2559a7;
+  background: #f0f5ff;
+}
+
+.dialog-choice small {
+  color: #7a7468;
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
 .preview-canvas {
   width: 100%;
   height: auto;

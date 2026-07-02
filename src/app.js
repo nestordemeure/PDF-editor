@@ -13,7 +13,7 @@ import { createPage, cloneOperations, getEffectiveColorMode } from "./pageModel.
 import { getBasePageCanvas, updatePageThumbnail, applyOperationsToCanvas, clearBaseThumbnailCache, detectClassicPage } from "./pageRenderer.js";
 import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection, forEachConcurrent, THUMBNAIL_CONCURRENCY } from "./pageCommands.js";
 import { savePdf } from "./saveManager.js";
-import { tryDecryptPdf } from "./classicPdf.js";
+import { tryDecryptPdf, stripTextFromPdf } from "./classicPdf.js";
 
 // DOM Elements
 const fileInput = document.getElementById("fileInput");
@@ -196,6 +196,7 @@ function createStateSnapshot() {
       selected: page.selected,
       thumbnail: page.thumbnail,
       isClassic: page.isClassic,
+      textStripped: page.textStripped,
     })),
   };
 }
@@ -243,6 +244,7 @@ async function restoreStateFromSnapshot(snapshot) {
       selected: snap.selected,
       thumbnail: snap.thumbnail || (reusable ? oldPage.thumbnail : null),
       isClassic: snap.isClassic,
+      textStripped: snap.textStripped,
     };
   });
 
@@ -386,6 +388,10 @@ function renderPages() {
 
     entry.label.textContent = `#${index + 1}`;
     entry.badge.hidden = !page.isClassic;
+    entry.badge.textContent = page.textStripped ? "stripped" : "text";
+    entry.badge.title = page.textStripped
+      ? "Text removed: page is saved as-is (graphics preserved) with no text layer"
+      : "Typeset page: saved as-is (text and quality preserved) unless edited beyond rotation";
     entry.checkbox.checked = page.selected;
     if (entry.thumbRef !== page.thumbnail) {
       drawCardThumbnail(entry, page);
@@ -459,6 +465,34 @@ function updatePreviewAfterRender() {
 // ============================================
 // PDF Loading
 // ============================================
+
+/**
+ * Modal asking what to do with a loaded file's text pages.
+ * Resolves with "keep" | "strip" | "rasterize" (Escape = keep).
+ */
+function askTextPagesChoice({ name, count }) {
+  const dialog = document.getElementById("textPagesDialog");
+  const message = document.getElementById("textPagesMessage");
+  message.textContent =
+    `"${name}" contains ${count} page${count === 1 ? "" : "s"} with selectable text. What should happen to that text?`;
+
+  return new Promise(resolve => {
+    const finish = choice => {
+      dialog.removeEventListener("click", onClick);
+      dialog.removeEventListener("cancel", onCancel);
+      if (dialog.open) dialog.close();
+      resolve(choice);
+    };
+    const onClick = event => {
+      const button = event.target.closest("[data-choice]");
+      if (button) finish(button.dataset.choice);
+    };
+    const onCancel = () => finish("keep");
+    dialog.addEventListener("click", onClick);
+    dialog.addEventListener("cancel", onCancel);
+    dialog.showModal();
+  });
+}
 
 async function loadScribe() {
   if (scribeModule) return scribeModule;
@@ -565,24 +599,47 @@ async function handleFiles(files) {
       await throttledYield();
     });
 
-    // Ask what to do with detected text pages: preserving keeps them
-    // verbatim (best for born-digital PDFs); stripping treats them as scans
-    // (cleanup + re-OCR — often better when the text comes from an old OCR).
+    // Ask what to do with detected text pages: keep them verbatim (best for
+    // born-digital PDFs), strip the text for good (junk OCR layers), or
+    // rasterize them into scans (cleanup + recompression + fresh OCR).
     for (const source of sources) {
       const classicPages = newPages.filter(page => page.sourceId === source.sourceId && page.isClassic);
       if (classicPages.length === 0) continue;
-      const keep = confirm(
-        `"${source.name}" contains ${classicPages.length} page${classicPages.length === 1 ? "" : "s"} with real text.\n\n` +
-        `OK — keep the text: these pages are saved as-is (text, fonts and quality preserved; embedded images still compressed).\n\n` +
-        `Cancel — strip the text: treat them as scans (cleaned, recompressed and re-OCRed; often better when the text comes from an old OCR).`
-      );
-      if (keep) continue;
-      for (const page of classicPages) {
-        page.isClassic = false;
-        page.operations.push({ type: "colorMode", mode: "gray" });
-        // Thumbnail is still the base render here (classic pages get no
-        // default operations), so the scan default can be applied directly
-        if (page.thumbnail) page.thumbnail = applyOperationsToCanvas(page.thumbnail, page.operations);
+
+      const choice = await askTextPagesChoice({ name: source.name, count: classicPages.length });
+
+      if (choice === "rasterize") {
+        for (const page of classicPages) {
+          page.isClassic = false;
+          page.operations.push({ type: "colorMode", mode: "gray" });
+          // Thumbnail is still the base render here (classic pages get no
+          // default operations), so the scan default can be applied directly
+          if (page.thumbnail) page.thumbnail = applyOperationsToCanvas(page.thumbnail, page.operations);
+        }
+      } else if (choice === "strip") {
+        // Rewrite the source itself so thumbnails, preview and save all see
+        // the stripped document; pages stay preserved (pass-through) at save
+        setStatus(`Stripping text from ${source.name}...`);
+        const stripped = await stripTextFromPdf(
+          sourcePdfs.get(source.sourceId).bytes,
+          classicPages.map(page => page.sourcePageIndex),
+          PDFDocument
+        );
+        if (stripped) {
+          const record = sourcePdfs.get(source.sourceId);
+          await record.pdfDoc.destroy();
+          record.bytes = stripped;
+          record.pdfDoc = await pdfjsLib.getDocument({ data: stripped.slice(0) }).promise;
+          source.pdfDoc = record.pdfDoc;
+          clearBaseThumbnailCache();
+          for (const page of classicPages) page.textStripped = true;
+          setStatus(`Updating thumbnails for ${source.name}...`);
+          await forEachConcurrent(classicPages, THUMBNAIL_CONCURRENCY, async page => {
+            await updatePageThumbnail({ pdfDoc: record.pdfDoc, page });
+          });
+        } else {
+          alert(`Could not strip the text from "${source.name}"; keeping it instead.`);
+        }
       }
     }
 

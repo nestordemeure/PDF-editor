@@ -12,7 +12,7 @@
 
 import { OperationType } from "./pageModel.js";
 import { encodeJpegBytes } from "./imagePixelOps.js";
-import { inflate } from "../vendor/pako.mjs";
+import { inflate, deflate } from "../vendor/pako.mjs";
 
 // qpdf WASM module instance, loaded lazily on the first encrypted PDF
 let qpdfModulePromise = null;
@@ -144,6 +144,188 @@ export async function copyPreservedPages({ targetDoc, pages, preserved, libDocs 
     });
   }
   return copiedByFinalIndex;
+}
+
+// ============================================
+// Text stripping
+// ============================================
+
+const CHAR = {
+  LPAREN: 40, RPAREN: 41, LT: 60, GT: 62, LBRACKET: 91, RBRACKET: 93,
+  LBRACE: 123, RBRACE: 125, SLASH: 47, PERCENT: 37, BACKSLASH: 92,
+};
+
+function isPdfWhitespace(c) {
+  return c === 32 || c === 10 || c === 13 || c === 9 || c === 12 || c === 0;
+}
+
+function isPdfDelimiter(c) {
+  return c === CHAR.LPAREN || c === CHAR.RPAREN || c === CHAR.LT || c === CHAR.GT ||
+    c === CHAR.LBRACKET || c === CHAR.RBRACKET || c === CHAR.LBRACE || c === CHAR.RBRACE ||
+    c === CHAR.SLASH || c === CHAR.PERCENT;
+}
+
+/**
+ * Blanks (overwrites with spaces) every text-showing operator (Tj, TJ, ', ")
+ * together with its operands in a content stream, leaving byte offsets — and
+ * therefore everything else — untouched.
+ * @returns {{bytes: Uint8Array, changed: boolean} | null} null = stream not
+ *   understood (e.g. inline images); caller must keep the original.
+ */
+function blankTextShowingOps(data) {
+  const out = data.slice();
+  const n = data.length;
+  let i = 0;
+  let groupStart = -1; // start of the operands accumulated for the next operator
+  let changed = false;
+
+  while (i < n) {
+    const c = data[i];
+    if (isPdfWhitespace(c)) { i++; continue; }
+    if (groupStart === -1) groupStart = i;
+
+    if (c === CHAR.LPAREN) { // literal string
+      i++;
+      let depth = 1;
+      while (i < n && depth > 0) {
+        const ch = data[i];
+        if (ch === CHAR.BACKSLASH) i += 2;
+        else { if (ch === CHAR.LPAREN) depth++; else if (ch === CHAR.RPAREN) depth--; i++; }
+      }
+      continue;
+    }
+    if (c === CHAR.LT) { // hex string or dict open
+      if (data[i + 1] === CHAR.LT) { i += 2; continue; }
+      i++;
+      while (i < n && data[i] !== CHAR.GT) i++;
+      i++;
+      continue;
+    }
+    if (c === CHAR.GT) { i += data[i + 1] === CHAR.GT ? 2 : 1; continue; } // dict close
+    if (c === CHAR.SLASH) { // name
+      i++;
+      while (i < n && !isPdfWhitespace(data[i]) && !isPdfDelimiter(data[i])) i++;
+      continue;
+    }
+    if (c === CHAR.PERCENT) { // comment
+      while (i < n && data[i] !== 10 && data[i] !== 13) i++;
+      continue;
+    }
+    if (c === CHAR.LBRACKET || c === CHAR.RBRACKET || c === CHAR.LBRACE || c === CHAR.RBRACE) {
+      i++;
+      continue;
+    }
+
+    // number or operator token
+    const tokenStart = i;
+    while (i < n && !isPdfWhitespace(data[i]) && !isPdfDelimiter(data[i])) i++;
+    const first = data[tokenStart];
+    const isNumber = (first >= 48 && first <= 57) || first === 43 || first === 45 || first === 46;
+    if (isNumber) continue;
+
+    const op = String.fromCharCode.apply(null, data.subarray(tokenStart, i));
+    if (op === "BI") return null; // inline image: binary data would derail the scan
+    if (op === "Tj" || op === "TJ" || op === "'" || op === '"') {
+      out.fill(32, groupStart, i);
+      changed = true;
+    }
+    groupStart = -1;
+  }
+  return { bytes: out, changed };
+}
+
+/**
+ * Returns the decoded bytes of a content/form stream, or null when the
+ * stream uses a filter we don't handle
+ */
+function decodeSimpleStream(context, stream) {
+  const { PDFName, PDFRawStream } = window.PDFLib;
+  if (!(stream instanceof PDFRawStream)) return null;
+  if (stream.dict.get(PDFName.of("DecodeParms"))) return null;
+  const filter = stream.dict.get(PDFName.of("Filter"));
+  if (!filter) return stream.getContents();
+  if (singleFilterName(context, stream.dict) !== "/FlateDecode") return null;
+  try {
+    return inflate(stream.getContents());
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Blanks the text ops of the stream at `ref` and swaps in the edited copy,
+ * keeping every other dict entry. No-op when the stream isn't understood.
+ */
+function stripTextFromStreamRef(context, ref) {
+  const { PDFName, PDFNumber, PDFRawStream } = window.PDFLib;
+  const stream = context.lookup(ref);
+  const decoded = decodeSimpleStream(context, stream);
+  if (!decoded) return;
+  const result = blankTextShowingOps(decoded);
+  if (!result || !result.changed) return;
+
+  const deflated = deflate(result.bytes);
+  const newDict = stream.dict.clone(context);
+  newDict.set(PDFName.of("Filter"), PDFName.of("FlateDecode"));
+  newDict.set(PDFName.of("Length"), PDFNumber.of(deflated.length));
+  context.assign(ref, PDFRawStream.of(newDict, deflated));
+}
+
+/**
+ * Recursively strips text from the Form XObjects of a resources dict
+ */
+function stripTextFromFormXObjects(context, resources, seen, depth = 0) {
+  const { PDFName, PDFDict, PDFRef } = window.PDFLib;
+  if (!resources || depth > 4) return;
+  const xobjects = context.lookup(resources.get(PDFName.of("XObject")));
+  if (!(xobjects instanceof PDFDict)) return;
+  for (const [, value] of xobjects.entries()) {
+    if (!(value instanceof PDFRef) || seen.has(value.toString())) continue;
+    seen.add(value.toString());
+    const stream = context.lookup(value);
+    if (!stream || !stream.dict) continue;
+    const subtype = asName(context, stream.dict.get(PDFName.of("Subtype")));
+    if (subtype !== "/Form") continue;
+    stripTextFromStreamRef(context, value);
+    const nested = context.lookup(stream.dict.get(PDFName.of("Resources")));
+    if (nested instanceof PDFDict) stripTextFromFormXObjects(context, nested, seen, depth + 1);
+  }
+}
+
+/**
+ * Removes all text (visible and invisible) from the given pages of a PDF,
+ * keeping images and vector graphics untouched. Used at load time so
+ * thumbnails, preview and save all see the stripped document.
+ * @returns {Promise<Uint8Array|null>} new PDF bytes, or null on failure
+ */
+export async function stripTextFromPdf(bytes, pageIndices, PDFDocument) {
+  const { PDFName, PDFArray, PDFRef, PDFDict } = window.PDFLib;
+  try {
+    const doc = await PDFDocument.load(bytes, { updateMetadata: false });
+    const context = doc.context;
+    const seenForms = new Set();
+
+    for (const pageIndex of pageIndices) {
+      const page = doc.getPage(pageIndex);
+      const contents = page.node.get(PDFName.of("Contents"));
+      const resolved = context.lookup(contents);
+      if (contents instanceof PDFRef && !(resolved instanceof PDFArray)) {
+        stripTextFromStreamRef(context, contents);
+      } else if (resolved instanceof PDFArray) {
+        for (let i = 0; i < resolved.size(); i++) {
+          const entry = resolved.get(i);
+          if (entry instanceof PDFRef) stripTextFromStreamRef(context, entry);
+        }
+      }
+      const resources = page.node.Resources();
+      if (resources instanceof PDFDict) stripTextFromFormXObjects(context, resources, seenForms);
+    }
+
+    return await doc.save({ useObjectStreams: true });
+  } catch (error) {
+    console.warn("Text stripping failed:", error);
+    return null;
+  }
 }
 
 // ============================================
