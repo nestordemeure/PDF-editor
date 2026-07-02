@@ -13,6 +13,7 @@ import { createPage, cloneOperations, getEffectiveColorMode } from "./pageModel.
 import { getBasePageCanvas, updatePageThumbnail, applyOperationsToCanvas, clearBaseThumbnailCache, detectClassicPage } from "./pageRenderer.js";
 import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection, forEachConcurrent, THUMBNAIL_CONCURRENCY } from "./pageCommands.js";
 import { savePdf } from "./saveManager.js";
+import { tryDecryptPdf } from "./classicPdf.js";
 
 // DOM Elements
 const fileInput = document.getElementById("fileInput");
@@ -487,14 +488,25 @@ async function handleFiles(files) {
     // Load all PDFs first to get counts
     const sources = [];
     for (const file of pdfFiles) {
-      const bytes = await file.arrayBuffer();
-      const pdfDoc = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
+      let bytes = await file.arrayBuffer();
+      let pdfDoc = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
       const sourceId = createSourceId();
       const baseName = getFileStem(file.name) || "file";
 
-      // getPermissions() is null for unencrypted files; pdf-lib cannot decrypt,
-      // so pages from encrypted sources always go through the raster pipeline
-      const encrypted = (await pdfDoc.getPermissions()) !== null;
+      // getPermissions() is null for unencrypted files. pdf-lib cannot
+      // decrypt, so strip the encryption with qpdf (WASM, loaded lazily);
+      // if that fails the source's pages go through the raster pipeline.
+      let encrypted = (await pdfDoc.getPermissions()) !== null;
+      if (encrypted) {
+        setStatus(`Decrypting ${file.name}...`);
+        const decrypted = await tryDecryptPdf(bytes);
+        if (decrypted) {
+          await pdfDoc.destroy();
+          bytes = decrypted;
+          pdfDoc = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
+          encrypted = false;
+        }
+      }
 
       sourcePdfs.set(sourceId, { bytes, pdfDoc, name: baseName, encrypted });
       if (baseName) sourceFileNames.add(baseName);
@@ -558,7 +570,7 @@ async function handleFiles(files) {
 
     if (classicInEncrypted > 0) {
       alert(
-        `This PDF is encrypted, which prevents keeping its text as real text: ` +
+        `This PDF is encrypted and could not be decrypted: ` +
         `${classicInEncrypted} text page${classicInEncrypted === 1 ? "" : "s"} will be rasterized (converted to images) on save.`
       );
     }

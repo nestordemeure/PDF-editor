@@ -14,6 +14,49 @@ import { OperationType } from "./pageModel.js";
 import { encodeJpegBytes } from "./imagePixelOps.js";
 import { inflate } from "../vendor/pako.mjs";
 
+// qpdf WASM module instance, loaded lazily on the first encrypted PDF
+let qpdfModulePromise = null;
+
+async function getQpdfModule() {
+  if (!qpdfModulePromise) {
+    qpdfModulePromise = (async () => {
+      const moduleUrl = new URL("../vendor/qpdf.mjs", import.meta.url);
+      const { default: QPDF } = await import(moduleUrl.href);
+      return QPDF({ noInitialRun: true, print: () => {}, printErr: () => {} });
+    })();
+  }
+  return qpdfModulePromise;
+}
+
+/**
+ * Strips the encryption from a PDF so pdf-lib can pass its pages through.
+ * Only works for files with an empty user password (the common "DRM-only"
+ * case — anything PDF.js opened without prompting). Returns the decrypted
+ * bytes, or null when decryption fails.
+ * @param {ArrayBuffer|Uint8Array} bytes
+ * @returns {Promise<ArrayBuffer|null>}
+ */
+export async function tryDecryptPdf(bytes) {
+  try {
+    const qpdf = await getQpdfModule();
+    qpdf.FS.writeFile("/input.pdf", bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+    let exitCode;
+    try {
+      exitCode = qpdf.callMain(["--decrypt", "--password=", "/input.pdf", "/output.pdf"]);
+    } finally {
+      qpdf.FS.unlink("/input.pdf");
+    }
+    // 0 = success, 3 = success with warnings (output still written)
+    if (exitCode !== 0 && exitCode !== 3) return null;
+    const output = qpdf.FS.readFile("/output.pdf");
+    qpdf.FS.unlink("/output.pdf");
+    return output.buffer;
+  } catch (error) {
+    console.warn("PDF decryption failed:", error);
+    return null;
+  }
+}
+
 /**
  * Operations that can be expressed natively on a preserved page.
  * Anything else (split, color mode, shading, contrast) forces rasterization

@@ -27,7 +27,7 @@ The **canonical operation order** is: geometric (rotate/split, in click order) �
 
 At save time, PDF.js renders on the main thread (pipelined, `SAVE_RENDER_CONCURRENCY`) while a pool of module workers does pixel processing and encoding, with an inline fallback if workers fail.
 
-**Classic (typeset) pages are passed through, not rasterized.** At load, `detectClassicPage` marks pages that have extractable text *and* aren't just a full-page image with an OCR layer (image-coverage < 90% of the page, measured by tracking the CTM determinant through the operator list — cheap because PDF.js caches the operator list from the thumbnail render). At save, classic pages whose only operations are rotations are copied verbatim with pdf-lib `copyPages` (text/fonts/vectors kept, rotation via `/Rotate`), interleaved into the scribe OCR document with `insertPage` when OCR runs (preserved pages are never re-OCR'd), and their embedded images are recompressed in place. Any other operation, an encrypted source (pdf-lib can't decrypt; the user is warned at load), or a pdf-lib load failure drops the page back to the raster pipeline — a document of pure scans takes exactly the old path for every page.
+**Classic (typeset) pages are passed through, not rasterized.** At load, `detectClassicPage` marks pages that have extractable text *and* aren't just a full-page image with an OCR layer (image-coverage < 90% of the page, measured by tracking the CTM determinant through the operator list — cheap because PDF.js caches the operator list from the thumbnail render). At save, classic pages whose only operations are rotations are copied verbatim with pdf-lib `copyPages` (text/fonts/vectors kept, rotation via `/Rotate`), interleaved into the scribe OCR document with `insertPage` when OCR runs (preserved pages are never re-OCR'd), and their embedded images are recompressed in place. Any other operation or a pdf-lib load failure drops the page back to the raster pipeline — a document of pure scans takes exactly the old path for every page. Encrypted sources are decrypted at load with qpdf WASM (`vendor/qpdf.mjs`, lazy-imported, empty-user-password only); if that fails the user is warned and the source rasterizes.
 
 ## Invariants — breaking these causes subtle bugs
 
@@ -58,6 +58,7 @@ cp node_modules/pako/dist/pako.mjs vendor/pako.mjs
 cp node_modules/@jsquash/jpeg/{encode.js,meta.js,utils.js} vendor/jsquash-jpeg/
 cp node_modules/@jsquash/jpeg/codec/enc/mozjpeg_enc.{js,wasm} vendor/jsquash-jpeg/codec/enc/
 # scribe.js OCR (AGPL): scribe.js + js/ lib/ tess/ fonts/ -> vendor/
+cp node_modules/qpdf-wasm-esm-embedded/qpdf.mjs vendor/qpdf.mjs  # single-file ESM, WASM embedded
 ```
 
 Copy each package's LICENSE alongside (see existing `vendor/LICENSE-*` files).
@@ -73,4 +74,4 @@ Copy each package's LICENSE alongside (see existing `vendor/LICENSE-*` files).
 
 No test suite; verify end-to-end headlessly: install `playwright` in a scratch dir (`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`, launch with `channel: 'chrome'`), serve the app with `python3 -m http.server`, upload `test data/input.pdf` (11-page book scan) via `#fileInput`, drive the buttons, and capture the download. Validate outputs with `qpdf --check`, `pdfimages -list` (bpc/colorspace/size per page), `pdftoppm` (visual), and `pdftotext -bbox` (OCR alignment). For performance claims, concatenate the sample into a ~330-page PDF with `qpdf` first.
 
-Test files: `input.pdf` (11-page scan **with an existing OCR text layer** — the classifier regression case), `classic.pdf` (64-page typeset book, RC4-encrypted — exercises the encrypted fallback + load warning), `classic-decrypted.pdf` (same, decrypted via `qpdf --decrypt` — exercises pass-through and image recompression; 63 classic pages + 1 image cover). For classic outputs also check `pdffonts` (fonts still embedded) and `pdftotext` (text survived).
+Test files: `input.pdf` (11-page scan **with an existing OCR text layer** — the classifier regression case), `classic.pdf` (64-page typeset book, RC4-encrypted with empty user password — exercises on-the-fly qpdf decryption), `classic-decrypted.pdf` (same, pre-decrypted — exercises pass-through and image recompression; 63 classic pages + 1 image cover). For classic outputs also check `pdffonts` (fonts still embedded) and `pdftotext` (text survived).
