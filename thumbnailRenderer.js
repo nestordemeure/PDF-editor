@@ -7,8 +7,8 @@
  * Because thumbnails and the save path use the same pipeline, previews match output.
  */
 
-import { applyModeToCanvas, removeShading, enhanceContrast } from "./imageColorModes.js";
-import { OperationType, getEffectiveColorMode } from "./pageModel.js";
+import { applyPixelPipeline, needsPixelWork } from "./imagePixelOps.js";
+import { OperationType } from "./pageModel.js";
 
 // Default thumbnail width in pixels
 const THUMBNAIL_WIDTH = 300;
@@ -87,9 +87,25 @@ export function cropCanvasHalf(canvas, side) {
  * @returns {HTMLCanvasElement}
  */
 export function applyOperationsToCanvas(canvas, operations, { shadingScale = 1 } = {}) {
+  const current = applyGeometricOpsToCanvas(canvas, operations);
+
+  if (needsPixelWork(operations)) {
+    const ctx = current.getContext("2d", { willReadFrequently: true });
+    const imageData = ctx.getImageData(0, 0, current.width, current.height);
+    applyPixelPipeline(imageData, operations, { shadingScale });
+    ctx.putImageData(imageData, 0, 0);
+  }
+
+  return current;
+}
+
+/**
+ * Applies only the geometric operations (rotate/split), in the order they
+ * were applied. Consumes the input canvas.
+ */
+export function applyGeometricOpsToCanvas(canvas, operations) {
   let current = canvas;
 
-  // Geometric operations, in the order they were applied
   for (const op of operations) {
     if (op.type === OperationType.ROTATE) {
       const times = ((op.degrees / 90) % 4 + 4) % 4;
@@ -103,19 +119,6 @@ export function applyOperationsToCanvas(canvas, operations, { shadingScale = 1 }
       releaseCanvas(current);
       current = cropped;
     }
-  }
-
-  // Pixel operations: shading and contrast must run before binarization
-  if (operations.some(op => op.type === OperationType.REMOVE_SHADING)) {
-    removeShading(current, shadingScale);
-  }
-  if (operations.some(op => op.type === OperationType.ENHANCE_CONTRAST)) {
-    enhanceContrast(current);
-  }
-
-  const colorMode = getEffectiveColorMode(operations);
-  if (colorMode !== "color") {
-    applyModeToCanvas(colorMode, current);
   }
 
   return current;
