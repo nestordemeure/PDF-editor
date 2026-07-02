@@ -50,12 +50,7 @@ let activePreviewId = null;
 let scribeModule = null;
 
 // Source PDF storage
-const sourcePdfs = new Map(); // sourceId -> { bytes, pdfDocs, name }
-
-// Number of PDF.js documents opened per file. Pages are striped across them
-// so image decoding (which happens in each document's own worker)
-// parallelizes during load, thumbnail regeneration, and save.
-const PDFJS_INSTANCES = 3;
+const sourcePdfs = new Map(); // sourceId -> { bytes, pdfDoc, name }
 let sourceIdCounter = 0;
 
 const sourceFileNames = new Set();
@@ -122,9 +117,7 @@ function createSourceId() {
 
 function getPdfDocForPage(page) {
   if (!page || !page.sourceId) return null;
-  const pdfDocs = sourcePdfs.get(page.sourceId)?.pdfDocs;
-  if (!pdfDocs || pdfDocs.length === 0) return null;
-  return pdfDocs[page.sourcePageIndex % pdfDocs.length];
+  return sourcePdfs.get(page.sourceId)?.pdfDoc || null;
 }
 
 function sanitizeFilenamePart(value, maxLength = 40) {
@@ -485,16 +478,14 @@ async function handleFiles(files) {
     const sources = [];
     for (const file of pdfFiles) {
       const bytes = await file.arrayBuffer();
-      const pdfDocs = await Promise.all(
-        Array.from({ length: PDFJS_INSTANCES }, () => pdfjsLib.getDocument({ data: bytes.slice(0) }).promise)
-      );
+      const pdfDoc = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
       const sourceId = createSourceId();
       const baseName = getFileStem(file.name) || "file";
 
-      sourcePdfs.set(sourceId, { bytes, pdfDocs, name: baseName });
+      sourcePdfs.set(sourceId, { bytes, pdfDoc, name: baseName });
       if (baseName) sourceFileNames.add(baseName);
 
-      sources.push({ sourceId, pdfDocs, numPages: pdfDocs[0].numPages, name: baseName });
+      sources.push({ sourceId, pdfDoc, numPages: pdfDoc.numPages, name: baseName });
     }
 
     // Create page objects with thumbnails (a few PDF.js renders in flight)
@@ -508,7 +499,7 @@ async function handleFiles(files) {
 
     await forEachConcurrent(pageSpecs, THUMBNAIL_CONCURRENCY, async ({ source, pageIndex }, specIndex) => {
       const { canvas: thumbnail, pageSizePts } = await getBasePageCanvas({
-        pdfDoc: source.pdfDocs[pageIndex % source.pdfDocs.length],
+        pdfDoc: source.pdfDoc,
         sourceId: source.sourceId,
         pageIndex,
       });

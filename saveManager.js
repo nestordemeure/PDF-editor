@@ -15,8 +15,8 @@ import { applyPixelPipeline, encodeProcessedImage } from "./imagePixelOps.js";
 import { getEffectiveColorMode } from "./pageModel.js";
 import { forEachConcurrent } from "./tools.js";
 
-// Pages rendered concurrently during save (PDF.js decode runs in parallel
-// across the striped documents; see app.js PDFJS_INSTANCES)
+// Pages rendered concurrently during save (overlaps PDF.js decoding with
+// main-thread rasterization and worker dispatch)
 const SAVE_RENDER_CONCURRENCY = 3;
 
 // Target DPI for compression levels
@@ -337,28 +337,18 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
   const pdfjsLib = window["pdfjs-dist/build/pdf"];
   const pdfDocCache = new Map();
 
-  // Resolves to the source's PDF.js documents (pages are striped across
-  // several instances so decoding parallelizes; see app.js)
-  const getPdfDocsForSource = (sourceId) => {
-    if (pdfDocCache.has(sourceId)) return pdfDocCache.get(sourceId);
-
-    const source = pdfSources.get ? pdfSources.get(sourceId) : pdfSources[sourceId];
-    let promise;
-    if (!source) promise = Promise.resolve(null);
-    else if (source.pdfDocs && source.pdfDocs.length) promise = Promise.resolve(source.pdfDocs);
-    else if (source.pdfDoc) promise = Promise.resolve([source.pdfDoc]);
-    else if (source.bytes) promise = pdfjsLib.getDocument({ data: source.bytes.slice(0) }).promise.then(doc => [doc]);
-    else promise = Promise.resolve(null);
-
-    pdfDocCache.set(sourceId, promise);
-    return promise;
-  };
-
   const getPdfDocForPage = async (page) => {
     if (!page || !page.sourceId || !pdfSources) return null;
-    const pdfDocs = await getPdfDocsForSource(page.sourceId);
-    if (!pdfDocs || pdfDocs.length === 0) return null;
-    return pdfDocs[page.sourcePageIndex % pdfDocs.length];
+    if (!pdfDocCache.has(page.sourceId)) {
+      const source = pdfSources.get ? pdfSources.get(page.sourceId) : pdfSources[page.sourceId];
+      let promise;
+      if (!source) promise = Promise.resolve(null);
+      else if (source.pdfDoc) promise = Promise.resolve(source.pdfDoc);
+      else if (source.bytes) promise = pdfjsLib.getDocument({ data: source.bytes.slice(0) }).promise;
+      else promise = Promise.resolve(null);
+      pdfDocCache.set(page.sourceId, promise);
+    }
+    return await pdfDocCache.get(page.sourceId);
   };
 
   const jpegQuality = compression === "low" ? 0.75 : compression === "medium" ? 0.60 : compression === "high" ? 0.50 : 0.85;
