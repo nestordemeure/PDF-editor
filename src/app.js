@@ -466,13 +466,18 @@ async function handleFiles(files) {
   setProgress(0, 1);
 
   try {
-    // Reset state for new load
+    // Reset state for new load; release the previous PDF.js documents
+    // (each one holds a worker and parsed data)
+    for (const source of sourcePdfs.values()) {
+      source.pdfDoc?.destroy();
+    }
     pages = [];
     history = [];
     future = [];
     sourcePdfs.clear();
     sourceFileNames.clear();
     clearBaseThumbnailCache();
+    renderPages(); // clear the old grid while the new files load
 
     // Load all PDFs first to get counts
     const sources = [];
@@ -540,12 +545,36 @@ async function handleFiles(files) {
 // Event Handlers
 // ============================================
 
-fileInput.addEventListener("change", event => {
-  handleFiles(Array.from(event.target.files));
-  event.target.value = "";
+// Commands are async and mutate shared state; only one may run at a time
+let commandInProgress = false;
+async function runExclusive(fn) {
+  if (commandInProgress) {
+    setStatus("Please wait for the current operation to finish.");
+    return;
+  }
+  commandInProgress = true;
+  try {
+    await fn();
+  } finally {
+    commandInProgress = false;
+  }
+}
+
+// Warn before losing edits on tab close
+window.addEventListener("beforeunload", event => {
+  if (pages.length > 0 || commandInProgress) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
 });
 
-rotateBtn.addEventListener("click", async () => {
+fileInput.addEventListener("change", event => {
+  const files = Array.from(event.target.files);
+  event.target.value = "";
+  runExclusive(() => handleFiles(files));
+});
+
+rotateBtn.addEventListener("click", () => runExclusive(async () => {
   const selected = getSelectedPages();
   if (selected.length === 0 || sourcePdfs.size === 0) return;
 
@@ -558,9 +587,9 @@ rotateBtn.addEventListener("click", async () => {
   renderPages();
   endProgress();
   setStatus("Rotation complete.");
-});
+}));
 
-colorModeSelect.addEventListener("change", async () => {
+colorModeSelect.addEventListener("change", () => runExclusive(async () => {
   const selected = getSelectedPages();
   if (selected.length === 0 || sourcePdfs.size === 0) return;
 
@@ -574,9 +603,9 @@ colorModeSelect.addEventListener("change", async () => {
   renderPages();
   endProgress();
   setStatus("Color mode updated.");
-});
+}));
 
-splitBtn.addEventListener("click", async () => {
+splitBtn.addEventListener("click", () => runExclusive(async () => {
   const selected = getSelectedPages();
   if (selected.length === 0 || sourcePdfs.size === 0) return;
 
@@ -590,9 +619,9 @@ splitBtn.addEventListener("click", async () => {
   renderPages();
   endProgress();
   setStatus("Split complete.");
-});
+}));
 
-deleteBtn.addEventListener("click", async () => {
+deleteBtn.addEventListener("click", () => runExclusive(async () => {
   const selected = getSelectedPages();
   if (selected.length === 0) return;
 
@@ -606,9 +635,9 @@ deleteBtn.addEventListener("click", async () => {
   renderPages();
   endProgress();
   setStatus("Delete complete.");
-});
+}));
 
-removeShadingBtn.addEventListener("click", async () => {
+removeShadingBtn.addEventListener("click", () => runExclusive(async () => {
   const selected = getSelectedPages();
   if (selected.length === 0 || sourcePdfs.size === 0) return;
 
@@ -621,9 +650,9 @@ removeShadingBtn.addEventListener("click", async () => {
   renderPages();
   endProgress();
   setStatus("Shading removal complete.");
-});
+}));
 
-enhanceContrastBtn.addEventListener("click", async () => {
+enhanceContrastBtn.addEventListener("click", () => runExclusive(async () => {
   const selected = getSelectedPages();
   if (selected.length === 0 || sourcePdfs.size === 0) return;
 
@@ -636,7 +665,7 @@ enhanceContrastBtn.addEventListener("click", async () => {
   renderPages();
   endProgress();
   setStatus("Contrast enhancement complete.");
-});
+}));
 
 selectAllToggle.addEventListener("change", () => {
   const checked = selectAllToggle.checked;
@@ -646,7 +675,7 @@ selectAllToggle.addEventListener("change", () => {
   renderPages();
 });
 
-undoBtn.addEventListener("click", async () => {
+undoBtn.addEventListener("click", () => runExclusive(async () => {
   if (history.length === 0) return;
 
   const currentState = createStateSnapshot();
@@ -658,9 +687,9 @@ undoBtn.addEventListener("click", async () => {
   await restoreStateFromSnapshot(previousState);
   renderPages();
   setStatus("Undo complete.");
-});
+}));
 
-redoBtn.addEventListener("click", async () => {
+redoBtn.addEventListener("click", () => runExclusive(async () => {
   if (future.length === 0) return;
 
   const currentState = createStateSnapshot();
@@ -672,10 +701,10 @@ redoBtn.addEventListener("click", async () => {
   await restoreStateFromSnapshot(nextState);
   renderPages();
   setStatus("Redo complete.");
-});
+}));
 
-saveBtn.addEventListener("click", async () => {
-  if (pages.length === 0 || sourcePdfs.size === 0 || saveBtn.disabled) return;
+saveBtn.addEventListener("click", () => runExclusive(async () => {
+  if (pages.length === 0 || sourcePdfs.size === 0) return;
 
   saveBtn.disabled = true;
   setStatus("Preparing to save...");
@@ -727,7 +756,7 @@ saveBtn.addEventListener("click", async () => {
   } finally {
     saveBtn.disabled = false;
   }
-});
+}));
 
 // Initial status
 setStatus("Load a PDF to begin.");

@@ -35,7 +35,7 @@ function writeGrayToRgb(data, values) {
   }
 }
 
-export function grayscaleData(imageData) {
+function grayscaleData(imageData) {
   writeGrayToRgb(imageData.data, getGrayscale(imageData.data, imageData.width * imageData.height));
 }
 
@@ -43,7 +43,7 @@ export function grayscaleData(imageData) {
 // Binarization
 // ============================================
 
-export function binarizeOtsuData(imageData) {
+function binarizeOtsuData(imageData) {
   const gray = getGrayscale(imageData.data, imageData.width * imageData.height);
 
   const histogram = new Uint32Array(256);
@@ -78,7 +78,7 @@ export function binarizeOtsuData(imageData) {
  * Adaptive (local mean) threshold. Block size scales with resolution
  * (~minDim/50) so thumbnails and full-resolution renders binarize alike.
  */
-export function binarizeAdaptiveData(imageData) {
+function binarizeAdaptiveData(imageData) {
   const width = imageData.width;
   const height = imageData.height;
   const gray = getGrayscale(imageData.data, width * height);
@@ -175,7 +175,7 @@ function boxBlurGray(gray, width, height, radius) {
  * curvature). `scale` adjusts the blur radius to the canvas resolution
  * (1 = 300 DPI full page) so previews and exports at different DPIs match.
  */
-export function removeShadingData(imageData, scale = 1, strength = 1.2) {
+function removeShadingData(imageData, scale = 1, strength = 1.2) {
   const width = imageData.width;
   const height = imageData.height;
   const radius = Math.max(2, Math.round(20 * scale));
@@ -196,7 +196,7 @@ export function removeShadingData(imageData, scale = 1, strength = 1.2) {
 /**
  * Min-max normalization to maximize contrast
  */
-export function enhanceContrastData(imageData) {
+function enhanceContrastData(imageData) {
   const gray = getGrayscale(imageData.data, imageData.width * imageData.height);
 
   let min = 255;
@@ -260,7 +260,7 @@ function isBwMode(mode) {
 /**
  * Packs a binarized image into 1 bit per pixel (rows byte-aligned, 1 = white)
  */
-export function packImageDataTo1Bit(imageData) {
+function packImageDataTo1Bit(imageData) {
   const { data, width, height } = imageData;
   const rowBytes = Math.ceil(width / 8);
   const packed = new Uint8Array(rowBytes * height);
@@ -278,7 +278,7 @@ export function packImageDataTo1Bit(imageData) {
 /**
  * Extracts the 8-bit grayscale channel
  */
-export function extractGray8(imageData) {
+function extractGray8(imageData) {
   return getGrayscale(imageData.data, imageData.width * imageData.height);
 }
 

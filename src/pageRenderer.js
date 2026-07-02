@@ -50,7 +50,7 @@ export async function getBasePageCanvas({ pdfDoc, sourceId, pageIndex, maxWidth 
  * Renders a PDF page to a canvas sized to fit maxWidth
  * @returns {Promise<{canvas: HTMLCanvasElement, pageSizePts: {width: number, height: number}}>}
  */
-export async function renderPdfPageThumbnail({ pdfDoc, pageIndex, maxWidth = THUMBNAIL_WIDTH }) {
+async function renderPdfPageThumbnail({ pdfDoc, pageIndex, maxWidth = THUMBNAIL_WIDTH }) {
   const page = await pdfDoc.getPage(pageIndex + 1); // PDF.js uses 1-based indexing
   const viewport = page.getViewport({ scale: 1 });
 
@@ -160,7 +160,7 @@ export function applyGeometricOpsToCanvas(canvas, operations) {
 /**
  * Generates a thumbnail for a page with its operations applied
  */
-export async function generateThumbnail({ pdfDoc, page, maxWidth = THUMBNAIL_WIDTH }) {
+async function generateThumbnail({ pdfDoc, page, maxWidth = THUMBNAIL_WIDTH }) {
   const { canvas, pageSizePts } = await getBasePageCanvas({
     pdfDoc,
     sourceId: page.sourceId,

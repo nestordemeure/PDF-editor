@@ -210,7 +210,7 @@ async function processPageInline({ pdfDoc, page, targetDpi, compression, jpegQua
  * encoding run in a pool of Web Workers, pipelined so the UI stays live.
  * Falls back to inline processing when workers are unavailable or fail.
  */
-export async function renderAllPages({ pages, getPdfDocForPage, jpegQuality = 0.85, compression = "high", needOcrImage = false, onProgress, onStatus }) {
+async function renderAllPages({ pages, getPdfDocForPage, jpegQuality = 0.85, compression = "high", needOcrImage = false, onProgress, onStatus }) {
   const results = new Array(pages.length);
   const pool = createSaveWorkerPool();
   let done = 0;
@@ -270,7 +270,7 @@ export async function renderAllPages({ pages, getPdfDocForPage, jpegQuality = 0.
 /**
  * Runs OCR on rendered pages using scribe.js
  */
-export async function runOcr({ renderedPages, lang, onProgress, onStatus, scribeModule }) {
+async function runOcr({ renderedPages, lang, onProgress, onStatus, scribeModule }) {
   try {
     await scribeModule.init({ ocr: true, font: true, pdf: true });
     scribeModule.opt.displayMode = "ebook";
