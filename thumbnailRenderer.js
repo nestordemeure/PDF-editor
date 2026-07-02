@@ -13,6 +13,39 @@ import { OperationType } from "./pageModel.js";
 // Default thumbnail width in pixels
 const THUMBNAIL_WIDTH = 300;
 
+// Base (original colors, no operations) page renders, cached as small JPEG
+// blobs so pixel-effect changes rebuild thumbnails without touching PDF.js.
+// Keyed by sourceId:pageIndex, so split halves share one entry.
+const baseThumbnailCache = new Map();
+
+export function clearBaseThumbnailCache() {
+  baseThumbnailCache.clear();
+}
+
+/**
+ * Returns the base render of a source page (original colors, no operations),
+ * from cache when possible. The returned canvas is owned by the caller.
+ * @returns {Promise<{canvas: HTMLCanvasElement, pageSizePts: {width: number, height: number}}>}
+ */
+export async function getBasePageCanvas({ pdfDoc, sourceId, pageIndex, maxWidth = THUMBNAIL_WIDTH }) {
+  const key = `${sourceId}:${pageIndex}`;
+  const cached = baseThumbnailCache.get(key);
+  if (cached) {
+    const bitmap = await createImageBitmap(cached.blob);
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0);
+    bitmap.close();
+    return { canvas, pageSizePts: cached.pageSizePts };
+  }
+
+  const { canvas, pageSizePts } = await renderPdfPageThumbnail({ pdfDoc, pageIndex, maxWidth });
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", 0.9));
+  if (blob) baseThumbnailCache.set(key, { blob, pageSizePts });
+  return { canvas, pageSizePts };
+}
+
 /**
  * Renders a PDF page to a canvas sized to fit maxWidth
  * @returns {Promise<{canvas: HTMLCanvasElement, pageSizePts: {width: number, height: number}}>}
@@ -128,8 +161,9 @@ export function applyGeometricOpsToCanvas(canvas, operations) {
  * Generates a thumbnail for a page with its operations applied
  */
 export async function generateThumbnail({ pdfDoc, page, maxWidth = THUMBNAIL_WIDTH }) {
-  const { canvas, pageSizePts } = await renderPdfPageThumbnail({
+  const { canvas, pageSizePts } = await getBasePageCanvas({
     pdfDoc,
+    sourceId: page.sourceId,
     pageIndex: page.sourcePageIndex,
     maxWidth,
   });

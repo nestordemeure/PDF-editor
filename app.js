@@ -9,7 +9,7 @@
  */
 
 import { createPage, cloneOperations, getEffectiveColorMode } from "./pageModel.js";
-import { renderPdfPageThumbnail, updatePageThumbnail, applyOperationsToCanvas } from "./thumbnailRenderer.js";
+import { getBasePageCanvas, updatePageThumbnail, applyOperationsToCanvas, clearBaseThumbnailCache } from "./thumbnailRenderer.js";
 import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection, forEachConcurrent, THUMBNAIL_CONCURRENCY } from "./tools.js";
 import { savePdf } from "./saveManager.js";
 
@@ -472,6 +472,7 @@ async function handleFiles(files) {
     future = [];
     sourcePdfs.clear();
     sourceFileNames.clear();
+    clearBaseThumbnailCache();
 
     // Load all PDFs first to get counts
     const sources = [];
@@ -498,8 +499,9 @@ async function handleFiles(files) {
     const throttledYield = makeThrottledYield();
 
     await forEachConcurrent(pageSpecs, THUMBNAIL_CONCURRENCY, async ({ source, pageIndex }, specIndex) => {
-      const { canvas: thumbnail, pageSizePts } = await renderPdfPageThumbnail({
+      const { canvas: thumbnail, pageSizePts } = await getBasePageCanvas({
         pdfDoc: source.pdfDoc,
+        sourceId: source.sourceId,
         pageIndex,
       });
 
