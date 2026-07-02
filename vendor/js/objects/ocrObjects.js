@@ -1,4 +1,4 @@
-import { calcBboxUnion } from '../utils/miscUtils.js';
+import { calcBboxUnion, calcBoxOverlap, getRandomAlphanum } from '../utils/miscUtils.js';
 
 /**
  * @param {number} n
@@ -24,6 +24,20 @@ export function OcrPage(n, dims) {
 }
 
 /**
+ * Paragraph type indicating the semantic role of the paragraph.
+ * @typedef {'title' | 'body' | 'footnote'} ParType
+ */
+
+export function ParDebugInfo() {
+  /** @type {?string} */
+  this.raw = null;
+  /** @type {?string} */
+  this.sourceType = null;
+  /** @type {?string} */
+  this.sourceStyle = null;
+}
+
+/**
  *
  * @param {OcrPage} page
  * @param {bbox} bbox
@@ -34,12 +48,37 @@ export function OcrPar(page, bbox) {
   this.bbox = bbox;
   /** @type {Array<OcrLine>} */
   this.lines = [];
+  this.id = getRandomAlphanum(8);
   /**
    * Reason for paragraph break.
    * Used for debugging purposes.
    * @type {string}
    */
   this.reason = '';
+  /**
+   * Type of paragraph indicating its semantic role.
+   * @type {ParType}
+   */
+  this.type = 'body';
+
+  /**
+   * Contains the paragraph / list number if applicable.
+   * This is not an index, but the actual number/letter as it appears in the text.
+   * @type {string | null}
+   */
+  this.parNum = null;
+  /**
+   * ID of the footnote reference word that links to this footnote.
+   * Only set when type === 'footnote'.
+   * @type {string | null}
+   */
+  this.footnoteRefId = null;
+  this.debug = new ParDebugInfo();
+}
+
+export function LineDebugInfo() {
+  /** @type {?string} */
+  this.raw = null;
 }
 
 /**
@@ -54,16 +93,13 @@ export function OcrPar(page, bbox) {
  * @property {?number} xHeight -
  * @property {Array<OcrWord>} words - words in line
  * @property {OcrPage} page - page line belongs to
- * @property {?number} _sizeCalc - calculated line font size (using `ascHeight` and `xHeight`)
- * @property {?number} _size - line font size set (set through other means)
- *  `_size` should be preferred over `_sizeCalc` when both exist.
  * @property {?string} raw - Raw string this object was parsed from.
  *    Exists only for debugging purposes, should be `null` in production contexts.
- * @property {?{x: number, y: number}} _angleAdj - Cached x/y adjustments that must be made to coordinates when rotation is enabled.
  */
 export function OcrLine(page, bbox, baseline, ascHeight = null, xHeight = null) {
   // These inline comments are required for types to work correctly with VSCode Intellisense.
   // Unfortunately, the @property tags above are not sufficient.
+  this.id = getRandomAlphanum(8);
   /** @type {bbox} */
   this.bbox = bbox;
   /** @type {Array<number>} - baseline [slope, offset] */
@@ -76,18 +112,17 @@ export function OcrLine(page, bbox, baseline, ascHeight = null, xHeight = null) 
   this.words = [];
   /** @type {OcrPage} */
   this.page = page;
-  /** @type {?number} */
-  this._sizeCalc = null;
-  /** @type {?number} */
-  this._size = null;
-  /** @type {?string} */
-  this.raw = null;
-  /** @type {?{x: number, y: number}} */
-  this._angleAdj = null;
   /** @type {OcrPar} */
   this.par = null;
   /** @type {number} */
   this.orientation = 0;
+  /** @type {LineDebugInfo} */
+  this.debug = new LineDebugInfo();
+}
+
+export function WordDebugInfo() {
+  /** @type {?string} */
+  this.raw = null;
 }
 
 /**
@@ -112,6 +147,8 @@ export function OcrWord(line, id, text, bbox, poly) {
     smallCaps: false,
     sup: false,
     dropcap: false,
+    color: '#000000',
+    opacity: 1,
   };
   /** @type {string} */
   this.lang = 'eng';
@@ -129,17 +166,21 @@ export function OcrWord(line, id, text, bbox, poly) {
   this.id = id;
   /** @type {OcrLine} */
   this.line = line;
-  /** @type {?string} */
-  this.raw = null;
   /** @type {?Array<OcrChar>} */
   this.chars = null;
-  /** @type {?{x: number, y: number}} */
-  this._angleAdj = null;
   /**
    * @type {boolean} - If `true`, left/right coordinates represent the left/rightmost pixel.
    * If `false`, left/right coordinates represent the start/end of the font bounding box.
    */
   this.visualCoords = true;
+  /** @type {WordDebugInfo} */
+  this.debug = new WordDebugInfo();
+  /**
+   * ID of the footnote paragraph that this word references.
+   * Only set when this word is a footnote reference (superscript number linking to a footnote).
+   * @type {string | null}
+   */
+  this.footnoteParId = null;
 }
 
 /**
@@ -358,6 +399,44 @@ const getPageText = (page) => {
 };
 
 /**
+ * Get text from words in a specific region of the page.
+ * This is a simple helper function that is used primarily for testing.
+ * The actual logic for checking whether words are in a specific layout area
+ * is more complex and is handled elsewhere.
+ * @param {OcrPage} page
+ * @param {bbox} bbox
+ */
+const getRegionText = (page, bbox) => {
+  const regionWords = /** @type {OcrWord[]} */ ([]);
+
+  for (let i = 0; i < page.lines.length; i++) {
+    const line = page.lines[i];
+    for (let j = 0; j < line.words.length; j++) {
+      const word = line.words[j];
+      if (calcBoxOverlap(word.bbox, bbox) > 0) {
+        regionWords.push(word);
+      }
+    }
+  }
+
+  if (regionWords.length === 0) return '';
+
+  let text = '';
+
+  for (let i = 0; i < regionWords.length; i++) {
+    if (i > 0 && regionWords[i - 1].line !== regionWords[i].line) {
+      text += '\n';
+    } else if (i > 0) {
+      text += ' ';
+    }
+
+    text += regionWords[i].text;
+  }
+
+  return text;
+};
+
+/**
  * Calculates adjustments to line x and y coordinates needed to auto-rotate the page.
  * This is the rotation applied to the first word in the line (not the entire line bbox).
  * @param {OcrLine} line
@@ -389,9 +468,7 @@ function calcLineStartAngleAdj(line) {
 
   const bboxRot = rotateBbox(bbox, cosAngle, sinAngle, width, height);
 
-  line._angleAdj = { x: bboxRot.left - bbox.left, y: bboxRot.bottom - bbox.bottom };
-
-  return line._angleAdj;
+  return { x: bboxRot.left - bbox.left, y: bboxRot.bottom - bbox.bottom };
 }
 
 /**
@@ -401,63 +478,64 @@ function calcLineStartAngleAdj(line) {
  * @param {OcrWord} word
  */
 function calcWordAngleAdj(word) {
-  // if (word._angleAdj === null) {
-  if (true) {
-    word._angleAdj = { x: 0, y: 0 };
+  const { angle } = word.line.page;
 
-    const { angle } = word.line.page;
+  if (Math.abs(angle ?? 0) > 0.05) {
+    const sinAngle = Math.sin(angle * (Math.PI / 180));
+    const cosAngle = Math.cos(angle * (Math.PI / 180));
 
-    if (Math.abs(angle ?? 0) > 0.05) {
-      const sinAngle = Math.sin(angle * (Math.PI / 180));
-      const cosAngle = Math.cos(angle * (Math.PI / 180));
+    const x = word.bbox.left - word.line.bbox.left;
+    const y = word.bbox.bottom - (word.line.bbox.bottom + word.line.baseline[1]);
 
-      const x = word.bbox.left - word.line.bbox.left;
-      const y = word.bbox.bottom - (word.line.bbox.bottom + word.line.baseline[1]);
+    if (word.style.sup || word.style.dropcap) {
+      const tanAngle = sinAngle / cosAngle;
+      const angleAdjYSup = (y - (x * tanAngle)) * cosAngle - y;
 
-      if (word.style.sup || word.style.dropcap) {
-        const tanAngle = sinAngle / cosAngle;
-        const angleAdjYSup = (y - (x * tanAngle)) * cosAngle - y;
+      const angleAdjXSup = angle > 0 ? 0 : angleAdjYSup * tanAngle;
 
-        const angleAdjXSup = angle > 0 ? 0 : angleAdjYSup * tanAngle;
-
-        word._angleAdj = { x: 0 - angleAdjXSup, y: angleAdjYSup };
-      } else {
-        const angleAdjXBaseline = x / cosAngle - x;
-        word._angleAdj = { x: angleAdjXBaseline, y: 0 };
-      }
+      return { x: 0 - angleAdjXSup, y: angleAdjYSup };
     }
+    const angleAdjXBaseline = x / cosAngle - x;
+    return { x: angleAdjXBaseline, y: 0 };
   }
 
-  return word._angleAdj;
+  return { x: 0, y: 0 };
 }
+
+const LIGATURE_ANY_RE = /[ĲĳŉǱǲǳǄǅǆǇǈǉǊǋǌﬀﬁﬂﬃﬄﬅﬆ]/;
+const LIGATURE_ALL_RE = /[ĲĳŉǱǲǳǄǅǆǇǈǉǊǋǌﬀﬁﬂﬃﬄﬅﬆ]/g;
+const LIGATURE_MAP = {
+  Ĳ: 'IJ',
+  ĳ: 'ij',
+  ŉ: 'ʼn',
+  Ǳ: 'DZ',
+  ǲ: 'Dz',
+  ǳ: 'dz',
+  Ǆ: 'DŽ',
+  ǅ: 'Dž',
+  ǆ: 'dž',
+  Ǉ: 'LJ',
+  ǈ: 'Lj',
+  ǉ: 'lj',
+  Ǌ: 'NJ',
+  ǋ: 'Nj',
+  ǌ: 'nj',
+  ﬀ: 'ff',
+  ﬁ: 'fi',
+  ﬂ: 'fl',
+  ﬃ: 'ffi',
+  ﬄ: 'ffl',
+  ﬅ: 'ſt',
+  ﬆ: 'st',
+};
 
 /**
  * Replace ligatures with individual ascii characters.
  * @param {string} text
  */
 function replaceLigatures(text) {
-  return text.replace(/Ĳ/g, 'IJ')
-    .replace(/ĳ/g, 'ij')
-    .replace(/ŉ/g, 'ʼn')
-    .replace(/Ǳ/g, 'DZ')
-    .replace(/ǲ/g, 'Dz')
-    .replace(/ǳ/g, 'dz')
-    .replace(/Ǆ/g, 'DŽ')
-    .replace(/ǅ/g, 'Dž')
-    .replace(/ǆ/g, 'dž')
-    .replace(/Ǉ/g, 'LJ')
-    .replace(/ǈ/g, 'Lj')
-    .replace(/ǉ/g, 'lj')
-    .replace(/Ǌ/g, 'NJ')
-    .replace(/ǋ/g, 'Nj')
-    .replace(/ǌ/g, 'nj')
-    .replace(/ﬀ/g, 'ff')
-    .replace(/ﬁ/g, 'fi')
-    .replace(/ﬂ/g, 'fl')
-    .replace(/ﬃ/g, 'ffi')
-    .replace(/ﬄ/g, 'ffl')
-    .replace(/ﬅ/g, 'ſt')
-    .replace(/ﬆ/g, 'st');
+  if (!LIGATURE_ANY_RE.test(text)) return text;
+  return text.replace(LIGATURE_ALL_RE, (m) => LIGATURE_MAP[m]);
 }
 
 /**
@@ -606,6 +684,8 @@ function clonePage(page) {
  */
 function cloneLine(line) {
   const lineNew = new OcrLine(line.page, { ...line.bbox }, line.baseline.slice(), line.ascHeight, line.xHeight);
+  lineNew.id = line.id;
+  lineNew.debug.raw = line.debug.raw;
   for (const word of line.words) {
     const wordNew = cloneWord(word);
     wordNew.line = lineNew;
@@ -629,7 +709,8 @@ function cloneWord(word) {
   wordNew.compTruth = word.compTruth;
   wordNew.matchTruth = word.matchTruth;
   wordNew.visualCoords = word.visualCoords;
-  wordNew.raw = word.raw;
+  wordNew.debug.raw = word.debug.raw;
+  wordNew.footnoteParId = word.footnoteParId;
   if (word.chars) {
     wordNew.chars = [];
     for (const char of word.chars) {
@@ -681,6 +762,37 @@ function getMatchingWords(text, ocrPage) {
 }
 
 /**
+ * Gets words in a line that match the provided text.
+ * @param {string} text
+ * @param {OcrLine} line
+ */
+function getMatchingWordsInLine(text, line) {
+  text = text.trim().toLowerCase();
+
+  if (!text) return [];
+  const textArr = text.split(' ');
+
+  const wordArr = line.words;
+
+  const matchArr = [];
+
+  for (let i = 0; i <= wordArr.length - textArr.length; i++) {
+    const word = wordArr[i];
+
+    if (!word.text.toLowerCase().includes(textArr[0])) continue;
+
+    const candArr = wordArr.slice(i, i + textArr.length);
+    const candText = candArr.map((x) => x.text).join(' ').toLowerCase();
+
+    if (candText.includes(text)) {
+      matchArr.push(...candArr);
+    }
+  }
+
+  return matchArr;
+}
+
+/**
  * Gets word IDs that match the provided text.
  * @param {string} text
  * @param {OcrPage} ocrPage
@@ -712,9 +824,49 @@ function getMatchingWordIds(text, ocrPage) {
 }
 
 /**
+ * Gets every match of `text` across all pages, in reading order, as one entry per non-overlapping occurrence.
+ * Each entry's `wordIds[0]` is the occurrence's first (anchor) word.
+ * @param {string} text
+ * @param {Array<OcrPage>} ocrPages
+ * @returns {Array<{pageN: number, wordIds: Array<string>}>}
+ */
+function getDocMatches(text, ocrPages) {
+  text = text.trim().toLowerCase();
+
+  if (!text) return [];
+  const textArr = text.split(' ');
+
+  const matches = [];
+
+  for (let p = 0; p < ocrPages.length; p++) {
+    const page = ocrPages[p];
+    if (!page) continue;
+
+    const wordArr = ocr.getPageWords(page);
+
+    for (let i = 0; i <= wordArr.length - textArr.length; i++) {
+      const word = wordArr[i];
+
+      if (!word.text.toLowerCase().includes(textArr[0])) continue;
+
+      const candArr = wordArr.slice(i, i + textArr.length);
+      const candText = candArr.map((x) => x.text).join(' ').toLowerCase();
+
+      if (candText.includes(text)) {
+        matches.push({ pageN: page.n, wordIds: candArr.map((x) => x.id) });
+        // Advance past the matched span so overlapping windows don't double-count one occurrence.
+        i += textArr.length - 1;
+      }
+    }
+  }
+
+  return matches;
+}
+
+/**
  *
  * @param {OcrWord} word
- * @param {"invis" | "ebook" | "eval" | "proof"} displayMode
+ * @param {'invis' | 'ebook' | 'eval' | 'proof' | 'annot'} displayMode
  * @param {number} [confThreshMed=75]
  * @param {number} [confThreshHigh=85]
  * @param {number} [overlayOpacity=80]
@@ -737,6 +889,9 @@ export function getWordFillOpacity(word, displayMode, confThreshMed = 75, confTh
   if (displayMode === 'invis') {
     opacity = 0;
     fill = 'black';
+  } else if (displayMode === 'annot') {
+    opacity = 1;
+    fill = 'black';
   } else if (displayMode === 'ebook') {
     opacity = 1;
     fill = 'black';
@@ -755,19 +910,69 @@ export function getWordFillOpacity(word, displayMode, confThreshMed = 75, confTh
  * Serialize the OCR data as JSON.
  * A special function is needed to remove circular references.
  * @param {Array<OcrPage>} pages - Layout data tables.
+ * @param {Object} [options]
+ * @param {boolean} [options.includeText=false] - Include text properties at page, par, and line level.
  */
-export const removeCircularRefsOcr = (pages) => {
+export const removeCircularRefsOcr = (pages, options = {}) => {
+  const { includeText = false } = options;
   const pagesClone = structuredClone(pages);
   pagesClone.forEach((page) => {
-    page.pars.length = 0;
+    if (!page) return;
+    // Add page-level text if requested (must be done before modifying lines)
+    if (includeText) {
+      // @ts-ignore
+      page.text = getPageText(page);
+    }
+
+    // Process paragraphs - convert line references to IDs
+    page.pars.forEach((par) => {
+      // Add par-level text if requested (must be done before deleting lines)
+      if (includeText) {
+        // @ts-ignore
+        par.text = getParText(par);
+      }
+      // @ts-ignore
+      delete par.page;
+      // Convert lines array to array of line IDs
+      // @ts-ignore
+      par.lineIds = par.lines.map((line) => line.id);
+      // @ts-ignore
+      delete par.lines;
+      // Delete debug if all values are empty/null
+      if (par.debug && !par.debug.raw && !par.debug.sourceType && !par.debug.sourceStyle) {
+        // @ts-ignore
+        delete par.debug;
+      }
+    });
+
     page.lines.forEach((line) => {
+      // Add line-level text if requested
+      if (includeText) {
+        // @ts-ignore
+        line.text = getLineText(line);
+      }
       // @ts-ignore
       delete line.page;
+      // Store par ID for deserialization
+      if (line.par) {
+        // @ts-ignore
+        line.parId = line.par.id;
+      }
       // @ts-ignore
       delete line.par;
+      // Delete debug if all values are empty/null
+      if (line.debug && !line.debug.raw) {
+        // @ts-ignore
+        delete line.debug;
+      }
       line.words.forEach((word) => {
         // @ts-ignore
         delete word.line;
+        // Delete debug if all values are empty/null
+        if (word.debug && !word.debug.raw) {
+          // @ts-ignore
+          delete word.debug;
+        }
       });
     });
   });
@@ -782,15 +987,116 @@ export const removeCircularRefsOcr = (pages) => {
  */
 export const addCircularRefsOcr = (pages) => {
   pages.forEach((page) => {
+    if (!page) return;
+    // Remove text property if present (added during export with includeText option)
+    // @ts-ignore
+    delete page.text;
+
     page.lines.forEach((line) => {
+      // Remove text property if present
+      // @ts-ignore
+      delete line.text;
       line.page = page;
+      // Restore debug object if not present
+      if (!line.debug) {
+        line.debug = new LineDebugInfo();
+      }
       line.words.forEach((word) => {
         word.line = line;
+        if (word.footnoteParId === undefined) {
+          word.footnoteParId = null;
+        }
+        // Restore debug object if not present
+        if (!word.debug) {
+          word.debug = new WordDebugInfo();
+        }
       });
     });
-  },
-  );
+
+    // Initialize pars array if not present
+    if (!page.pars) {
+      page.pars = [];
+    }
+
+    // Restore paragraph references
+    page.pars.forEach((par) => {
+      // Remove text property if present
+      // @ts-ignore
+      delete par.text;
+      par.page = page;
+      // Restore debug object if not present
+      if (!par.debug) {
+        par.debug = new ParDebugInfo();
+      }
+      // Initialize footnoteRefId to null if not present
+      if (par.footnoteRefId === undefined) {
+        par.footnoteRefId = null;
+      }
+      // Restore lines array from lineIds
+      // @ts-ignore
+      if (par.lineIds && !par.lines) {
+        // @ts-ignore
+        par.lines = par.lineIds.map((id) => page.lines.find((line) => line.id === id)).filter((line) => line !== undefined);
+        // @ts-ignore
+        delete par.lineIds;
+      }
+      // Initialize lines array if not present
+      if (!par.lines) {
+        par.lines = [];
+      }
+    });
+
+    // Restore line.par references from parId
+    page.lines.forEach((line) => {
+      // @ts-ignore
+      if (line.parId !== undefined) {
+        // @ts-ignore
+        line.par = page.pars.find((par) => par.id === line.parId) || null;
+        // @ts-ignore
+        delete line.parId;
+      } else if (line.par === undefined) {
+        line.par = null;
+      }
+    });
+  });
   return pages;
+};
+
+/**
+ * Updates OCR format to latest version.
+ * This function should be modified whenever the OCR data format changes
+ * to ensure backward compatibility with older .scribe files.
+ * @param {OcrPage[]} pages
+ */
+export const updateOcrFormat = (pages) => {
+  pages.forEach((page) => {
+    if (!page) return;
+    page.lines.forEach((line) => {
+      if (!line.debug) {
+        line.debug = new LineDebugInfo();
+        // @ts-ignore
+        if (line.raw) {
+          // @ts-ignore
+          line.debug.raw = line.raw;
+        }
+      }
+      // @ts-ignore
+      delete line.raw;
+
+      line.words.forEach((word) => {
+        if (!word.debug) {
+          word.debug = new WordDebugInfo();
+          // @ts-ignore
+          if (word.raw) {
+            // @ts-ignore
+            word.debug.raw = word.raw;
+          }
+        }
+        // @ts-ignore
+        delete word.raw;
+      });
+    });
+  });
 };
 
 const ocr = {
@@ -799,6 +1105,9 @@ const ocr = {
   OcrLine,
   OcrWord,
   OcrChar,
+  ParDebugInfo,
+  WordDebugInfo,
+  LineDebugInfo,
   calcLineStartAngleAdj,
   updateLineBbox,
   calcBboxUnion,
@@ -808,10 +1117,13 @@ const ocr = {
   getPageWords,
   getDistinctChars,
   getMatchingWords,
+  getMatchingWordsInLine,
   getMatchingWordIds,
+  getDocMatches,
   getPageText,
   getParText,
   getLineText,
+  getRegionText,
   getPrevLine,
   getNextLine,
   getWordFillOpacity,
@@ -825,6 +1137,8 @@ const ocr = {
   scaleLine,
   scalePage,
   escapeXml,
+  removeCircularRefsOcr,
+  addCircularRefsOcr,
 };
 
 export default ocr;

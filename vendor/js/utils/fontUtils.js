@@ -1,28 +1,30 @@
 // This file contains utility functions for calculating statistics using Opentype.js font objects.
 // The only import/dependency this file should have (aside from importing misc utility functions) should be fontObjects.js.
 
-import { FontCont } from '../containers/fontContainer.js';
 import { getPrevLine } from '../objects/ocrObjects.js';
-import { FontProps, quantile } from './miscUtils.js';
+import { quantile } from './miscUtils.js';
 
-import opentype from '../../lib/opentype.module.js';
-import { opt } from '../containers/app.js';
+import opentype from '../font-parser/src/index.js';
+import { scribeDocDefaults } from '../containers/scribeDocDefaults.js';
+
+/** @typedef {import('../containers/fontContainer.js').DocFonts} DocFonts */
 
 /**
  * Return an array of all characters used in the provided OCR data.
  * Used for subsetting fonts to only the necessary characters.
  * @param {Array<OcrPage>} ocrPageArr
+ * @param {DocFonts} docFonts - Per-document fonts. Required; no active-document fallback.
  * @param {string} [family] - Font family to filter by. If empty, all fonts are included.
  * @param {string} [style] - Font style to filter by. If empty, all styles are included.
- *
  */
-export const getDistinctCharsFont = (ocrPageArr, family, style) => {
+export const getDistinctCharsFont = (ocrPageArr, docFonts, family, style) => {
   const charsAll = {};
   for (const ocrPage of ocrPageArr) {
+    if (!ocrPage) continue;
     for (const ocrLine of ocrPage.lines) {
       for (const ocrWord of ocrLine.words) {
         if (family || style) {
-          const wordFont = FontCont.getWordFont(ocrWord);
+          const wordFont = docFonts.getWordFont(ocrWord);
           if (!wordFont) continue;
           if (family && wordFont.family !== family) continue;
           // Sometimes the font is 'normal' even when the requested style is 'bold' or 'italic'.
@@ -41,7 +43,7 @@ export const getDistinctCharsFont = (ocrPageArr, family, style) => {
 
 /**
  *
- * @param {import('opentype.js').Font} font
+ * @param {opentype.Font} font
  * @param {Array<string>} charArr
  * @returns
  */
@@ -56,9 +58,18 @@ export async function subsetFont(font, charArr = []) {
   // even if no literal space characters are in the data.
   if (!charArr.includes(' ')) glyphs.push(font.charToGlyph(' '));
 
+  // Skip charToGlyph's gid-0 fallback to avoid pushing `.notdef` a second time.
+  // A duplicated glyph object emits its `glyph.unicodes` twice in the output cmap,
+  // which Acrobat rejects as malformed.
+  const seen = new Set(glyphs);
   charArr.forEach((x) => {
-    const glyph = font.charToGlyph(x);
-    if (glyph) glyphs.push(glyph);
+    const glyphIndex = font.charToGlyphIndex(x);
+    if (glyphIndex === null || glyphIndex === 0) return;
+    const glyph = font.glyphs.get(glyphIndex);
+    if (glyph && !seen.has(glyph)) {
+      seen.add(glyph);
+      glyphs.push(glyph);
+    }
   });
 
   // The relevant table is sometimes but not always in a property named `windows`.
@@ -68,6 +79,7 @@ export async function subsetFont(font, charArr = []) {
   const subset = new opentype.Font({
     familyName: namesTable.postScriptName.en,
     styleName: namesTable.fontSubfamily.en,
+    postScriptName: namesTable.postScriptName.en,
     unitsPerEm: font.unitsPerEm,
     ascender: font.ascender,
     descender: font.descender,
@@ -80,7 +92,7 @@ export async function subsetFont(font, charArr = []) {
 /**
  * Calculates font size by comparing provided character height to font metrics.
  *
- * @param {import('opentype.js').Font} fontOpentype
+ * @param {opentype.Font} fontOpentype
  * @param {number} heightActual - Actual, measured height of text in pixels.
  * @param {string} text - Text to compare `heightActual` against.
  *
@@ -107,7 +119,7 @@ function getFontSize(fontOpentype, heightActual, text) {
 /**
  * Calculates font size for an array of words using the most granular bounding box available (character or word-level) rather than using line-level metrics.
  * @param {Array<OcrWord>} wordArr
- * @param {import('opentype.js').Font} fontOpentype
+ * @param {opentype.Font} fontOpentype
  * @param {Boolean} [nonLatin=false]
  *
  */
@@ -129,11 +141,15 @@ function calcWordFontSizePrecise(wordArr, fontOpentype, nonLatin = false) {
 /**
  * Adds ligatures to text of `OcrWord` object. Returns an array of letters.
  * @param {OcrWord} word
+ * @param {DocFonts} docFonts - Per-document fonts.
+ * @param {Object} [settings]
+ * @param {boolean} [settings.ligatures]
  * @returns {Array<string>}
  */
-export function addLigatures(word) {
-  if (word.style.smallCaps || !opt.ligatures) return word.text.split('');
-  const fontI = FontCont.getWordFont(word);
+export function addLigatures(word, docFonts, settings) {
+  const ligatures = settings?.ligatures ?? scribeDocDefaults.ligatures;
+  if (word.style.smallCaps || !ligatures) return word.text.split('');
+  const fontI = docFonts.getWordFont(word);
   const fontOpentype = fontI.opentype;
   return addLigaturesText(word.text, fontOpentype);
 }
@@ -188,8 +204,11 @@ export const missingGlyphs = {};
  *
  * @param {Array<string>|string} wordText
  * @param {opentype.Font} fontOpentype
+ * @param {Object} [settings]
+ * @param {boolean} [settings.kerning]
  */
-export function calcWordCharMetrics(wordText, fontOpentype) {
+export function calcWordCharMetrics(wordText, fontOpentype, settings) {
+  const kerning = settings?.kerning ?? scribeDocDefaults.kerning;
   const wordTextArr = typeof wordText === 'string' ? wordText.split('') : wordText;
 
   /** @type {Array<number>} */
@@ -203,16 +222,18 @@ export function calcWordCharMetrics(wordText, fontOpentype) {
     const fontName = fontOpentype.tables.name.postScriptName.en;
     if (!glyphI || glyphI.name === '.notdef') {
       if (!missingGlyphs[fontName]) missingGlyphs[fontName] = new Set();
-      missingGlyphs[fontName].add(charI);
-      console.log(`Character ${charI} is not defined in font ${fontName}`);
+      if (!missingGlyphs[fontName].has(charI)) {
+        missingGlyphs[fontName].add(charI);
+        console.log(`Character ${charI} is not defined in font ${fontName}`);
+      }
     }
     advanceArr.push(glyphI.advanceWidth);
 
     if (charJ) {
-      if (opt.kerning) {
+      if (kerning) {
         const glyphJ = fontOpentype.charToGlyph(charJ);
-        const kerning = fontOpentype.getKerningValue(glyphI, glyphJ);
-        kerningArr.push(kerning);
+        const kerningVal = fontOpentype.getKerningValue(glyphI, glyphJ);
+        kerningArr.push(kerningVal);
       } else {
         kerningArr.push(0);
       }
@@ -237,23 +258,27 @@ export function calcWordCharMetrics(wordText, fontOpentype) {
  */
 /**
  * @param {OcrWord} word
+ * @param {DocFonts} docFonts - Per-document fonts. Required; no active-document fallback.
  * @param {number} [angle=0] - Angle of page rotation in degrees, used to calculate character spacing.
  *    This is only used during the PDF export, when the rotation is applied by a matrix transformation,
  *    so the text always needs to be printed as if it were horizontal.
+ * @param {Object} [settings]
+ * @param {boolean} [settings.ligatures]
+ * @param {boolean} [settings.kerning]
  * @async
  * @return {WordMetrics}
  */
-export function calcWordMetrics(word, angle = 0) {
-  const fontI = FontCont.getWordFont(word);
+export function calcWordMetrics(word, docFonts, angle = 0, settings) {
+  const fontI = docFonts.getWordFont(word);
   const fontOpentype = fontI.opentype;
 
-  const fontSize = calcWordFontSize(word);
+  const fontSize = calcWordFontSize(word, docFonts);
 
-  const charArr = addLigatures(word);
+  const charArr = addLigatures(word, docFonts, settings);
 
   const charArr2 = word.style.smallCaps ? charArr.map((x) => (x.toUpperCase())) : charArr;
 
-  const { advanceArr, kerningArr } = calcWordCharMetrics(charArr2, fontOpentype);
+  const { advanceArr, kerningArr } = calcWordCharMetrics(charArr2, fontOpentype, settings);
 
   if (word.style.smallCaps) {
     for (let i = 0; i < charArr2.length; i++) {
@@ -316,9 +341,10 @@ export function calcWordMetrics(word, angle = 0) {
  * (3) the line font size,
  * (4) a hard-coded default value.
  * @param {OcrWord} word
+ * @param {DocFonts} docFonts - Per-document fonts. Required; no active-document fallback.
  */
-export const calcWordFontSize = (word) => {
-  const font = FontCont.getWordFont(word);
+export const calcWordFontSize = (word, docFonts) => {
+  const font = docFonts.getWordFont(word);
   const fontOpentype = font.opentype;
 
   // If the word is a superscript or dropcap, then size is calculated dynamically for the word.
@@ -329,8 +355,7 @@ export const calcWordFontSize = (word) => {
       return getFontSize(fontOpentype, word.bbox.bottom - word.bbox.top, word.text);
     }
     if (word.style.size) {
-      const mult = FontProps.sizeMult[font.family] || 1;
-      return word.style.size / mult;
+      return word.style.size;
     }
 
     return (word.bbox.bottom - word.bbox.top) * (fontOpentype.unitsPerEm / (fontOpentype.ascender - fontOpentype.descender));
@@ -338,10 +363,9 @@ export const calcWordFontSize = (word) => {
 
   // If the user manually set a size, then use that
   if (word.style.size) {
-    const mult = FontProps.sizeMult[font.family] || 1;
-    return word.style.size / mult;
+    return word.style.size;
   }
-  const lineFontSize = calcLineFontSize(word.line);
+  const lineFontSize = calcLineFontSize(word.line, docFonts);
 
   if (lineFontSize) return lineFontSize;
 
@@ -356,19 +380,13 @@ export const calcWordFontSize = (word) => {
  * Get or calculate font size for line.
  * This value will either be (1) a manually set value or (2) a value calculated using line metrics.
  * @param {OcrLine} line
+ * @param {DocFonts} docFonts - Per-document fonts. Required; no active-document fallback.
  * @returns {number}
  */
-export const calcLineFontSize = (line) => {
-  if (line._size) return line._size;
-
-  // TODO: Add back cache when there are also functions that clear cache at appropriate times.
-  // if (line._sizeCalc) return line._sizeCalc;
-
-  // const anyChinese = line.words.filter((x) => x.lang === 'chi_sim').length > 0;
-
+export const calcLineFontSize = (line, docFonts) => {
   const nonLatin = line.words[0]?.lang === 'chi_sim';
 
-  const font = FontCont.getWordFont(line.words[0]);
+  const font = docFonts.getWordFont(line.words[0]);
 
   // This condition should be handled even if not expected to occur,
   // as some fonts (Chinese) are not loaded synchronously with the main application,
@@ -377,12 +395,10 @@ export const calcLineFontSize = (line) => {
     // If no font metrics are known, use the font size from the previous line.
     const linePrev = getPrevLine(line);
     if (linePrev) {
-      line._sizeCalc = calcLineFontSize(linePrev);
-    // If there is no previous line, as a last resort, use a hard-coded default value.
-    } else {
-      line._sizeCalc = 15;
+      return calcLineFontSize(linePrev, docFonts);
     }
-    return line._sizeCalc;
+    // If there is no previous line, as a last resort, use a hard-coded default value.
+    return 15;
   }
 
   const fontOpentype = font.opentype;
@@ -393,8 +409,7 @@ export const calcLineFontSize = (line) => {
     const fontSizeCalc = calcWordFontSizePrecise(line.words, fontOpentype, nonLatin);
     // `fontSizeCalc` has been negative under fringe conditions, so check for that.
     if (fontSizeCalc && fontSizeCalc > 0) {
-      line._sizeCalc = fontSizeCalc;
-      return line._sizeCalc;
+      return fontSizeCalc;
     }
   }
 
@@ -411,7 +426,7 @@ export const calcLineFontSize = (line) => {
     if (Math.max(size1, size2) / Math.min(size1, size2) > 1.2) {
       const linePrev = getPrevLine(line);
       if (linePrev) {
-        const sizeLast = calcLineFontSize(linePrev);
+        const sizeLast = calcLineFontSize(linePrev, docFonts);
         if (sizeLast && (Math.max(size1, sizeLast) / Math.min(size1, sizeLast) <= 1.2 || Math.max(sizeLast, size2) / Math.min(sizeLast, size2) <= 1.2)) {
           if (Math.abs(sizeLast - size2) < Math.abs(sizeLast - size1)) {
             sizeFinal = Math.floor((sizeLast + size2) / 2);
@@ -422,23 +437,25 @@ export const calcLineFontSize = (line) => {
       }
     }
 
-    line._sizeCalc = sizeFinal;
-  // If only x-height is known, calculate font size using x-height.
-  } else if (!line.ascHeight && line.xHeight) {
-    line._sizeCalc = getFontSize(fontOpentype, line.xHeight, 'o');
-  // If only ascender height is known, calculate font size using ascender height.
-  } else if (line.ascHeight && !line.xHeight) {
-    line._sizeCalc = getFontSize(fontOpentype, line.ascHeight, 'A');
-  } else {
-    // If no font metrics are known, use the font size from the previous line.
-    const linePrev = getPrevLine(line);
-    if (linePrev) {
-      line._sizeCalc = calcLineFontSize(linePrev);
-    // If there is no previous line, as a last resort, use a hard-coded default value.
-    } else {
-      line._sizeCalc = 15;
-    }
+    return sizeFinal;
   }
 
-  return line._sizeCalc;
+  // If only x-height is known, calculate font size using x-height.
+  if (!line.ascHeight && line.xHeight) {
+    return getFontSize(fontOpentype, line.xHeight, 'o');
+  }
+
+  // If only ascender height is known, calculate font size using ascender height.
+  if (line.ascHeight && !line.xHeight) {
+    return getFontSize(fontOpentype, line.ascHeight, 'A');
+  }
+
+  // If no font metrics are known, use the font size from the previous line.
+  const linePrev = getPrevLine(line);
+  if (linePrev) {
+    return calcLineFontSize(linePrev, docFonts);
+  }
+
+  // If there is no previous line, as a last resort, use a hard-coded default value.
+  return 15;
 };

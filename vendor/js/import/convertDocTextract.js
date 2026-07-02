@@ -6,13 +6,14 @@ import {
   descCharArr,
   ascCharArr,
   xCharArr,
-  removeSuperscript,
 } from '../utils/miscUtils.js';
 
 import {
   LayoutDataColumn, LayoutDataTable, LayoutDataTablePage,
 } from '../objects/layoutObjects.js';
-import { pass3 } from './convertPageShared.js';
+import { pass3, splitUnicodeSuperscripts } from './convertPageShared.js';
+
+const debugMode = false;
 
 /**
  *
@@ -42,8 +43,11 @@ const detectPolyOrientation = (poly) => {
  * @param {Object} params
  * @param {string|string[]} params.ocrStr - String or array of strings containing Textract JSON data.
  * @param {dims[]} params.pageDims - Page metrics to use for the pages (Textract only).
+ * @param {number} [params.pageNum] - Page number to assign.
+ *    Should only be provided if running per-page recognition with multi-page document,
+ *    where it is needed to prevent every page number from being 0.
  */
-export async function convertDocTextract({ ocrStr, pageDims }) {
+export async function convertDocTextract({ ocrStr, pageDims, pageNum }) {
   const blocks = /** @type {TextractBlock[]} */ ([]);
   try {
     if (typeof ocrStr === 'string') {
@@ -56,22 +60,65 @@ export async function convertDocTextract({ ocrStr, pageDims }) {
         console.warn(`Invalid Textract JSON data at index ${i}. Expected an array of blocks.`);
         continue;
       }
-      blocks.push(...textractData.Blocks);
+      for (const block of textractData.Blocks) {
+        blocks.push(block);
+      }
     }
   } catch (error) {
+    console.error(error);
     throw new Error('Failed to parse Textract JSON.');
   }
 
   const pageBlocks = blocks.filter((block) => block.BlockType === 'PAGE');
 
+  if (pageNum !== undefined && pageBlocks.length > 1) {
+    console.warn('Multiple PAGE blocks found but pageNum is specified. Using pageNum for all pages.');
+  }
+
+  // Build maps once for all blocks for better performance with large documents.
+  const relationshipMap = new Map();
+  blocks.forEach((block) => {
+    if (block.Relationships) {
+      block.Relationships.forEach((rel) => {
+        if (rel.Type === 'CHILD') {
+          relationshipMap.set(block.Id, rel.Ids || []);
+        }
+      });
+    }
+  });
+
+  const blockMap = new Map();
+  blocks.forEach((block) => {
+    blockMap.set(block.Id, block);
+  });
+
+  /** @type {Map<number, {lines: TextractBlock[], layouts: TextractBlock[], tables: TextractBlock[]}>} */
+  const blocksByPage = new Map();
+  blocks.forEach((block) => {
+    const n = block.Page || 1;
+    let pageData = blocksByPage.get(n);
+    if (!pageData) {
+      pageData = { lines: [], layouts: [], tables: [] };
+      blocksByPage.set(n, pageData);
+    }
+    if (block.BlockType === 'LINE') {
+      pageData.lines.push(block);
+    } else if (block.BlockType === 'TABLE') {
+      pageData.tables.push(block);
+    } else if (block.BlockType && block.BlockType.startsWith('LAYOUT_')) {
+      pageData.layouts.push(block);
+    }
+  });
+
   const resArr = [];
 
-  for (let n = 0; n < pageBlocks.length; n++) {
-    const pageBlock = pageBlocks[n];
+  for (let i = 0; i < pageBlocks.length; i++) {
+    const n = pageNum ?? i;
+    const pageBlock = pageBlocks[i];
 
     // Textract uses normalized coordinates (0-1), we need to convert to pixels
     // We'll assume standard page dimensions since Textract doesn't provide pixel dimensions
-    const pageDimsN = pageDims[n];
+    const pageDimsN = pageDims[i];
     if (!pageDimsN) {
       throw new Error(`No page dimensions provided for page ${n + 1}.`);
     }
@@ -81,42 +128,19 @@ export async function convertDocTextract({ ocrStr, pageDims }) {
 
     const pageOrientation = detectPolyOrientation(pagePoly);
 
-    console.log(`Page ${n + 1} orientation: ${pageOrientation * 90} degrees`);
-
     const pageObj = new ocr.OcrPage(n, pageDimsN);
 
-    const lineBlocks = blocks.filter((block) => block.BlockType === 'LINE' && (!block.Page && n === 0 || block.Page === n + 1));
+    const pageData = blocksByPage.get(i + 1) || { lines: [], layouts: [], tables: [] };
+    const lineBlocks = pageData.lines;
+    const layoutBlocks = pageData.layouts;
+    const tableBlocks = pageData.tables;
+
     if (lineBlocks.length === 0) {
-      const warn = { char: 'char_error' };
-      return {
-        pageObj,
-        charMetricsObj: {},
-        dataTables: new LayoutDataTablePage(n),
-        warn,
-      };
+      resArr.push({ pageObj, dataTables: new LayoutDataTablePage(n), langSet: new Set() });
+      continue;
     }
 
-    const tablesPage = convertTableLayoutTextract(n, blocks, pageDimsN);
-
-    const relationshipMap = new Map();
-    blocks.forEach((block) => {
-      if (block.Relationships) {
-        block.Relationships.forEach((rel) => {
-          if (rel.Type === 'CHILD') {
-            relationshipMap.set(block.Id, rel.Ids || []);
-          }
-        });
-      }
-    });
-
-    const blockMap = new Map();
-    blocks.forEach((block) => {
-      blockMap.set(block.Id, block);
-    });
-
-    // Process layout blocks (paragraphs) and their lines
-    const layoutBlocks = blocks.filter((block) => block.BlockType && block.BlockType.startsWith('LAYOUT_'),
-    );
+    const tablesPage = convertTableLayoutTextract(n, tableBlocks, pageDimsN, blockMap);
 
     // Create a map to track which lines belong to which layout blocks
     const lineToLayoutMap = new Map();
@@ -179,8 +203,7 @@ export async function convertDocTextract({ ocrStr, pageDims }) {
  * @param {number} pageOrientation - Orientation of the page (0-3)
  */
 function convertLineTextract(lineBlock, blockMap, relationshipMap, pageObj, pageNum, lineIndex, pageDims, pageOrientation) {
-  // `lineBlock.Page` will be undefined when the entire document is a single page.
-  if (!lineBlock.Text || !lineBlock.Geometry || (lineBlock.Page || 1) - 1 !== pageNum) return null;
+  if (!lineBlock.Text || !lineBlock.Geometry) return null;
 
   // Convert normalized coordinates to pixels
   const bboxLine = convertBoundingBox(lineBlock.Geometry.BoundingBox, pageDims);
@@ -303,6 +326,8 @@ function convertLineTextract(lineBlock, blockMap, relationshipMap, pageObj, page
     lineObj.baseline[0] = (polyLine.br.y - polyLine.bl.y) / (polyLine.br.x - polyLine.bl.x);
   }
 
+  splitUnicodeSuperscripts(lineObj);
+
   const descCharRegex = new RegExp(`[${descCharArr.join('')}]`);
   const ascCharRegex = new RegExp(`[${ascCharArr.join('')}]`);
   const xCharRegex = new RegExp(`[${xCharArr.join('')}]`);
@@ -340,12 +365,6 @@ function convertLineTextract(lineBlock, blockMap, relationshipMap, pageObj, page
     }
     if (descCharRegex.test(word.text) && !ascCharRegex.test(word.text)) {
       descOnlyWords.push(word);
-    }
-
-    // Replace unicode superscript characters with regular text.
-    // TODO: This should be updated to properly handle superscripts rather than removing them.
-    if (/[⁰¹²³⁴⁵⁶⁷⁸⁹ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻᴬᴮᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ⁺⁻⁼⁽⁾]/g.test(word.text)) {
-      word.text = removeSuperscript(word.text);
     }
   }
 
@@ -480,6 +499,10 @@ function createParagraphsFromLayout(pageObj, layoutBlocks, relationshipMap, bloc
       // Set the layout block type as a reason for debugging
       parObj.reason = layoutBlock.BlockType || 'LAYOUT_UNKNOWN';
 
+      if (debugMode) {
+        parObj.debug.sourceType = layoutBlock.BlockType || null;
+      }
+
       paragraphLines.forEach((lineObj) => {
         lineObj.par = parObj;
       });
@@ -510,14 +533,14 @@ function createParagraphsFromLayout(pageObj, layoutBlocks, relationshipMap, bloc
 /**
  *
  * @param {number} pageNum
- * @param {TextractBlock[]} blocks
+ * @param {TextractBlock[]} tableBlocks - Pre-filtered table blocks for this page
  * @param {dims} pageDims
+ * @param {Map<string, TextractBlock>} blockMap - Map of Textract blocks by ID
  */
-function convertTableLayoutTextract(pageNum, blocks, pageDims) {
+function convertTableLayoutTextract(pageNum, tableBlocks, pageDims, blockMap) {
   const tablesPage = new LayoutDataTablePage(pageNum);
 
-  const tableBlocks = blocks.filter((block) => block.BlockType === 'TABLE' && (!block.Page && pageNum === 0 || block.Page === pageNum + 1));
-
+  // Build relationship map only for table blocks
   const relationshipMap = new Map();
   tableBlocks.forEach((block) => {
     if (block.Relationships) {
@@ -527,11 +550,6 @@ function convertTableLayoutTextract(pageNum, blocks, pageDims) {
         }
       });
     }
-  });
-
-  const blockMap = new Map();
-  blocks.forEach((block) => {
-    blockMap.set(block.Id, block);
   });
 
   for (const tableBlock of tableBlocks) {
@@ -568,6 +586,20 @@ function convertTableLayoutTextract(pageNum, blocks, pageDims) {
         }, table);
         table.boxes.push(column);
       });
+
+      // Build row boundaries from cell bounding boxes.
+      const maxRow = Math.max(...cellBlocks.map((c) => c.RowIndex || 0));
+      const startRow = cellsByRow.has(0) ? 0 : 1;
+      table.rowBounds = [];
+      for (let r = startRow; r <= maxRow; r++) {
+        const rowCells = cellsByRow.get(r) || [];
+        let maxBottom = 0;
+        for (const cell of rowCells) {
+          const cellBbox = convertBoundingBox(cell.Geometry.BoundingBox, pageDims);
+          if (cellBbox.bottom > maxBottom) maxBottom = cellBbox.bottom;
+        }
+        table.rowBounds.push(maxBottom);
+      }
     }
 
     if (table.boxes.length > 0) {

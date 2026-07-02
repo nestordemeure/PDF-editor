@@ -83,6 +83,12 @@ export class LayoutDataTable {
     this.id = getRandomAlphanum(10);
     /** @type {Array<LayoutDataColumn>} */
     this.boxes = [];
+    /** @type {?Array<number>} Bottom y-coordinate of each row. Rows will be detected automatically if not set. */
+    this.rowBounds = null;
+    /** @type {'grid' | 'segmented-hline' | 'text'} */
+    this.detectionMethod = 'text';
+    /** @type {{ text: string, bbox: {left: number, top: number, right: number, bottom: number} } | null} */
+    this.title = null;
   }
 }
 
@@ -115,6 +121,7 @@ export const removeCircularRefsDataTables = (pages) => {
       });
     });
   });
+  return pagesClone;
 };
 
 /**
@@ -139,6 +146,8 @@ const layout = {
   LayoutDataColumn,
   LayoutDataTable,
   LayoutRegion,
+  removeCircularRefsDataTables,
+  addCircularRefsDataTables,
 };
 
 export default layout;

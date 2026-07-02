@@ -9,16 +9,17 @@ declare global {
         smallCaps: boolean;
         sup: boolean;
         dropcap: boolean;
+        color: string;
+        opacity: number;
     };
 
     // Strings representing supported sources of text.
     // `stext` indicates the text was extracted directly from a PDF using mupdf.
-    type TextSource = null | 'tesseract' | 'textract' | 'google_vision' | 'abbyy' | 'stext' | 'hocr' | 'text' | 'azure_doc_intel';
+    type TextSource = null | 'tesseract' | 'textract' | 'google_vision' | 'google_doc_ai' | 'abbyy' | 'alto' | 'stext' | 'hocr' | 'text' | 'azure_doc_intel' | 'docx';
 
     type FontState = {
         enableOpt: boolean;
         forceOpt: boolean;
-        enableCleanToNimbusMono: boolean;
         defaultFontName: string;
         serifDefaultName: string;
         sansDefaultName: string;
@@ -31,6 +32,7 @@ declare global {
         fontState: FontState;
         layoutRegions: LayoutPage[];
         layoutDataTables: LayoutDataTablePage[];
+        annotations: Annotation[][];
     }
 
     type StyleLookup = ('normal' | 'bold' | 'italic' | 'boldItalic');
@@ -89,8 +91,8 @@ declare global {
         boldItalic: ArrayBuffer | null;
     };
 
-    type opentypeFont = import("../lib/opentype.module.js").Font;
-    type opentypeGlyph = import("../lib/opentype.module.js").Glyph;
+    type opentypeFont = import("./font-parser/src/index.js").Font;
+    type opentypeGlyph = import("./font-parser/src/index.js").Glyph;
     type GeneralScheduler = import("./generalWorkerMain.js").GeneralScheduler;
 
     // Image objects
@@ -175,7 +177,7 @@ declare global {
         errorAdjB: number | null; // Adjusted error of "B" words. Null until calculated.
     };
 
-    type ProgressMessage = ProgressMessageConvert | ProgressMessageGeneral;
+    type ProgressMessage = ProgressMessageConvert | ProgressMessageGeneral | ProgressMessageRecognize;
 
     type ProgressMessageGeneral = {
         type: 'export' | 'importImage' | 'importPDF' | 'render';
@@ -191,7 +193,64 @@ declare global {
         };
     }
 
+    type ProgressMessageRecognize = {
+        type: 'recognize';
+        n?: number;
+        info?: {
+            status?: string;
+            engineName?: string;
+            elapsedMs?: number;
+            responsesReceived?: number;
+            timestamp?: number;
+        };
+    }
+
     type FileNode = import("./import/nodeAdapter.js").FileNode;
+
+    type AnnotationHighlight = {
+        type?: 'highlight';
+        bbox: bbox;
+        color: string;
+        opacity: number;
+        groupId: string;
+        comment?: string;
+        quads?: bbox[];
+    };
+
+    type AnnotationFreeText = {
+        type: 'freetext';
+        /** Annotation rectangle in page coordinates (top-left origin, same frame as OCR words). */
+        bbox: bbox;
+        contents: string;
+        /** Text size in the same coordinate frame as bbox (converted to PDF points at write time). */
+        fontSize: number;
+        /** Text color, '#rrggbb'. */
+        textColor: string;
+        /** Background color, '#rrggbb'; omitted = transparent. */
+        fillColor?: string;
+        opacity: number;
+    };
+
+    type AnnotationShapeStyle = {
+        /** Stroke/border color, '#rrggbb'. Default '#ff0000'. */
+        borderColor?: string;
+        /** Interior fill, '#rrggbb'; omitted = outline only. */
+        fillColor?: string;
+        /** Opacity 0..1 applied to stroke and fill. Default 1. */
+        opacity?: number;
+        /** Border width in page units. Default 1. */
+        borderWidth?: number;
+        comment?: string;
+    };
+
+    /** Geometry below is in page coordinates (top-left origin, same frame as OCR words). */
+    type AnnotationSquare = AnnotationShapeStyle & { type: 'square'; bbox: bbox; };
+    type AnnotationCircle = AnnotationShapeStyle & { type: 'circle'; bbox: bbox; };
+    type AnnotationLine = AnnotationShapeStyle & { type: 'line'; points: [number, number, number, number]; };
+    type AnnotationPolygon = AnnotationShapeStyle & { type: 'polygon' | 'polyline'; vertices: number[]; };
+    type AnnotationShape = AnnotationSquare | AnnotationCircle | AnnotationLine | AnnotationPolygon;
+
+    type Annotation = AnnotationHighlight | AnnotationFreeText | AnnotationShape;
 
     // Layout objects
     type LayoutPage = import("./objects/layoutObjects.js").LayoutPage;
@@ -230,6 +289,28 @@ declare global {
         name: string;
         objN: number;
         opentype: opentypeFont;
+        /**
+         * Width-scaled variants of this font for words that would otherwise split when a viewer extracts text.
+         * These differ only in declared advance widths, sharing the base `opentype` object by reference and carrying a `widthScale` (see below).
+         */
+        widthVariants?: Array<{ scale: number; info: PdfFontInfo }>;
+        /**
+         * Advance-width multiplier for a width-scaled variant. Absent (treated as 1) on base fonts.
+         * Applied when generating the variant's `/W` array and at the export-font advance reads in `writePdfText`.
+         */
+        widthScale?: number;
+        /**
+         * For a width-scaled variant, the object numbers of the base font's shared FontDescriptor and ToUnicode CMap.
+         * The variant references these instead of re-embedding the font program.
+         * Their presence marks "variant mode" in `createEmbeddedFontType0`.
+         */
+        baseDescriptorObjN?: number;
+        baseToUnicodeObjN?: number;
+        /**
+         * Per-GID unicode override for the embedded font's ToUnicode CMap.
+         * For example, ligature or Type3-replacement glyphs whose code does not map to a single source character.
+         */
+        toUnicodeOverride?: Map<number, string>;
     };
 
     type PdfFontFamily = {
@@ -330,12 +411,37 @@ declare global {
         text: string;
     }
 
-    // Azure Document Intelligence types
-    interface AzureDocIntelPoint {
-        x: number;
-        y: number;
+    // Recognition model types (for custom/external recognition models)
+    type RecognitionOutputFormat = 'textract' | 'google_vision' | 'google_doc_ai' | 'azure_doc_intel' | 'hocr' | 'abbyy' | 'alto' | 'stext' | 'text';
+
+    type RecognitionResult = {
+        success: boolean;
+        rawData?: string;
+        format: RecognitionOutputFormat | string;
+        error?: Error;
+    };
+
+    interface RecognitionModelConfig {
+        name: string;
+        outputFormat: RecognitionOutputFormat | null;
+        rateLimit?: { tps: number } | { rpm: number };
     }
 
+    interface RecognitionModel {
+        config: RecognitionModelConfig;
+        recognizeImage(imageData: Uint8Array | ArrayBuffer, options?: any): Promise<RecognitionResult>;
+        recognizeDocument?(documentData: Uint8Array | ArrayBuffer, options?: any): Promise<RecognitionResult>;
+        convertPage?(rawData: string, n: number): Promise<{
+            pageObj: OcrPage;
+            dataTables: LayoutDataTablePage;
+            warn: object;
+            langSet: Set<string>;
+            fontSet: Set<string>;
+        }>;
+        isThrottlingError?(error: Error): boolean;
+    }
+
+    // Azure Document Intelligence types
     interface AzureDocIntelSpan {
         offset: number;
         length: number;
@@ -343,14 +449,14 @@ declare global {
 
     interface AzureDocIntelWord {
         content: string;
-        polygon: AzureDocIntelPoint[];
+        polygon: number[];
         span: AzureDocIntelSpan;
         confidence: number;
     }
 
     interface AzureDocIntelLine {
         content: string;
-        polygon: AzureDocIntelPoint[];
+        polygon: number[];
         spans: AzureDocIntelSpan[];
     }
 
@@ -385,6 +491,176 @@ declare global {
         lastUpdatedDateTime: string;
         analyzeResult: AzureDocIntelAnalyzeResult;
     }
+
+    // Tesseract types
+    type TessOutputFormats = {
+        text: boolean;
+        blocks: boolean;
+        layoutBlocks: boolean;
+        hocr: boolean;
+        tsv: boolean;
+        box: boolean;
+        unlv: boolean;
+        osd: boolean;
+        imageColor: boolean;
+        imageGrey: boolean;
+        imageBinary: boolean;
+        debug: boolean;
+    };
+
+    type TessRecognizeOptions = {
+        rectangle: TessRectangle;
+        rotateAuto: boolean;
+        rotateRadians: number;
+    };
+
+    type TessRecognizeResult = {
+        jobId: string;
+        data: TessPage;
+    };
+
+    type TessRectangle = {
+        left: number;
+        top: number;
+        width: number;
+        height: number;
+    };
+
+    type TessImageLike = string | Blob;
+
+    type TessBaseline = {
+        x0: number;
+        y0: number;
+        x1: number;
+        y1: number;
+        has_baseline: boolean;
+    };
+
+    type TessRowAttributes = {
+        ascenders: number;
+        descenders: number;
+        rowHeight: number;
+    };
+
+    type TessBbox = {
+        x0: number;
+        y0: number;
+        x1: number;
+        y1: number;
+    };
+
+    type TessChoice = {
+        text: string;
+        confidence: number;
+    };
+
+    type TessSymbol = {
+        choices: TessChoice[];
+        image: any;
+        text: string;
+        confidence: number;
+        baseline: TessBaseline;
+        bbox: TessBbox;
+        is_superscript: boolean;
+        is_subscript: boolean;
+        is_dropcap: boolean;
+        word: TessWord;
+        line: TessLine;
+        paragraph: TessParagraph;
+        block: TessBlock;
+        page: TessPage;
+    };
+
+    type TessWord = {
+        symbols: TessSymbol[];
+        choices: TessChoice[];
+        text: string;
+        confidence: number;
+        baseline: TessBaseline;
+        bbox: TessBbox;
+        is_numeric: boolean;
+        in_dictionary: boolean;
+        direction: string;
+        language: string;
+        is_bold: boolean;
+        is_italic: boolean;
+        is_underlined: boolean;
+        is_monospace: boolean;
+        is_serif: boolean;
+        is_smallcaps: boolean;
+        font_size: number;
+        font_id: number;
+        font_name: string;
+        line: TessLine;
+        paragraph: TessParagraph;
+        block: TessBlock;
+        page: TessPage;
+    };
+
+    type TessLine = {
+        words: TessWord[];
+        text: string;
+        confidence: number;
+        baseline: TessBaseline;
+        rowAttributes: TessRowAttributes;
+        bbox: TessBbox;
+        paragraph: TessParagraph;
+        block: TessBlock;
+        page: TessPage;
+        symbols: TessSymbol[];
+    };
+
+    type TessParagraph = {
+        lines: TessLine[];
+        text: string;
+        confidence: number;
+        baseline: TessBaseline;
+        bbox: TessBbox;
+        is_ltr: boolean;
+        block: TessBlock;
+        page: TessPage;
+        words: TessWord[];
+        symbols: TessSymbol[];
+    };
+
+    type TessBlock = {
+        paragraphs: TessParagraph[];
+        text: string;
+        confidence: number;
+        baseline: TessBaseline;
+        bbox: TessBbox;
+        blocktype: string;
+        polygon: any;
+        page: TessPage;
+        lines: TessLine[];
+        words: TessWord[];
+        symbols: TessSymbol[];
+    };
+
+    type TessPage = {
+        blocks: TessBlock[] | null;
+        confidence: number;
+        lines: TessLine[];
+        oem: string;
+        osd: string;
+        paragraphs: TessParagraph[];
+        psm: string;
+        symbols: TessSymbol[];
+        text: string;
+        version: string;
+        words: TessWord[];
+        hocr: string | null;
+        tsv: string | null;
+        box: string | null;
+        unlv: string | null;
+        sd: string | null;
+        imageColor: string | null;
+        imageGrey: string | null;
+        imageBinary: string | null;
+        rotateRadians: number | null;
+        debug: string | null;
+        debugVis: string | null;
+    };
 
 }
 

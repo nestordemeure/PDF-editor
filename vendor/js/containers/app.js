@@ -1,57 +1,42 @@
+/**
+ * Process-wide settings.
+ * Per-document settings live on `ScribeDoc.defaults` and instance fields, not here.
+ * Anything that controls how a specific document or workflow runs belongs there.
+ */
 export class opt {
-  static ligatures = false;
+  /**
+   * Number of workers to use. Must be set prior to initialization.
+   * If set to `null` (default), the number of workers will be set up to 6 (browser) or 8 (node),
+   * if the system has enough resources.
+   * @type {?number}
+   */
+  static workerN = null;
 
-  static kerning = true;
+  /**
+   * Run document work (PDF parsing and rendering) on the calling thread instead of in a worker pool, and skip eagerly pre-warming that pool.
+   * When running inexpensive operations (no OCR) in the CLI (1 document, no re-used workers),
+   * loading workers often slows things down in absolute terms.
+   * In all cases, users are better off running the CLI in parallel at the document level (e.g. using GNU Parallel).
+   * Worker-only features (OCR recognition, OCR file conversion, font optimization) currently still spawn workers on first use.
+   * Must be set prior to initialization.
+   */
+  static inProcess = false;
 
-  static omitNativeText = false;
+  /**
+   * Custom URL or path to load Tesseract `.traineddata` files from.
+   * If `null` (default), files are fetched from the jsdelivr CDN.
+   * Set this to a directory containing `<lang>.traineddata.gz` to use a local
+   * mirror, useful in sandboxed/offline environments. The path is used as-is
+   * with the language code appended, e.g. `${langPath}/eng.traineddata.gz`.
+   * @type {?string}
+   */
+  static langPath = null;
 
-  static extractText = false;
-
-  static enableUpscale = false;
-
-  static ignorePunct = false;
-
-  static ignoreCap = false;
-
-  static ignoreExtra = false;
-
-  static confThreshHigh = 85;
-
-  static confThreshMed = 75;
-
-  static addOverlay = true;
-
-  static standardizePageSize = false;
-
-  static humanReadablePDF = false;
-
-  static intermediatePDF = false;
-
-  static reflow = true;
-
-  static removeMargins = false;
-
-  static includeImages = false;
-
-  static pageBreaks = true;
-
-  /** @type {("invis"|"ebook"|"eval"|"proof")} */
-  static displayMode = 'proof';
-
-  /** @type {('color'|'gray'|'binary')} */
-  static colorMode = 'color';
-
-  static overlayOpacity = 80;
-
-  static autoRotate = true;
-
-  static enableLayout = false;
-
-  static xlsxFilenameColumn = true;
-
-  static xlsxPageNumberColumn = true;
-
-  static saveDebugImages = false;
+  /**
+   * Share the loaded PDF across PDF workers via `SharedArrayBuffer` instead of giving each worker its own clone.
+   * Only supported within specific environments (e.g. Chrome with COOP/COEP headers, Node with worker threads and shared memory enabled).
+   */
+  static usePdfSharedBuffer = false;
 
   static warningHandler = (x) => console.warn(x);
 
@@ -60,83 +45,67 @@ export class opt {
   /** @param {ProgressMessage} x */
   // eslint-disable-next-line no-unused-vars
   static progressHandler = (x) => {};
-
-  /** Generate debug visualizations when running OCR. */
-  static debugVis = false;
-
-  static extractPDFFonts = false;
-
-  static calcSuppFontInfo = false;
-
-  /**
-   * How to use PDF text data extracted from input PDFs (if any).
-   * The `native` option controls how native text data is used (i.e. visible text rendered by the PDF viewer),
-   * while the `ocr` option controls how OCR text data is used (i.e. invisible text printed over an image).
-   * If `main` is true, then the data will be used as the primary data source.
-   * If `supp` is true, then the data will be used as a supplemental data source (may be used to correct errors in the primary data source).
-   */
-  static usePDFText = {
-    native: {
-      supp: true,
-      main: true,
-    },
-    ocr: {
-      supp: true,
-      main: false,
-    },
-  };
-
-  /**
-   * Always convert and retain existing PDF text data.
-   * By default (`false`), if the existing PDF text data will not be used (per the `usePDFText` settings),
-   * it is discarded and never converted into the internal OCR format.
-   * This performance/memory optimization can be disabled by setting this option to `true`,
-   * resulting in the PDF text being converted and retained even if (for example) it is corrupted.
-   */
-  static keepPDFTextAlways = false;
-
-  /**
-   * Number of workers to use. Must be set prior to initialization.
-   * If set to `null` (default), the number of workers will be set up to 6 (browser) or 8 (node),
-   * if the system has enough resources.
-   * @type {?number}
-   */
-  static workerN = null;
 }
 
-export class inputData {
+/**
+ * Per-document input metadata: which input modes are active and basic file info.
+ * Each `ScribeDoc` owns one.
+ */
+export class InputData {
   /** `true` if OCR data exists (whether from upload or built-in engine) */
-  static xmlMode = [];
+  xmlMode = [];
 
   /** `true` if user uploaded pdf */
-  static pdfMode = false;
+  pdfMode = false;
 
   /** @type {?('text'|'ocr'|'image')} */
-  static pdfType = null;
+  pdfType = null;
+
+  /**
+   * Per-page raw content measurements (PDF inputs only), one per page.
+   * @type {?Array<import('../pdf/ocrPageSelection.js').PageStats|null>}
+   */
+  pageStats = null;
+
+  /**
+   * Per-page boolean: whether OCR was applied to that page in the last recognition run,
+   * so its active text layer is OCR rather than native. `null` before any run.
+   * @type {?boolean[]}
+   */
+  ocrApplied = null;
+
+  /**
+   * `true` when any page has content that needs OCR: a sizeable image, path-drawn text, image-borne text,
+   * a broken-font run, or a full-page scan. It is a recommendation only.
+   */
+  requiresOCR = false;
 
   /** `true` if user uploaded image files (.png, .jpeg) */
-  static imageMode = false;
+  imageMode = false;
 
   /** `true` if user re-uploaded HOCR data created by Scribe OCR */
-  static resumeMode = false;
+  resumeMode = false;
 
   /** `true` if ground truth data is uploaded */
-  static evalMode = false;
+  evalMode = false;
 
-  static inputFileNames = [];
+  inputFileNames = [];
 
-  static defaultDownloadFileName = '';
+  defaultDownloadFileName = '';
 
-  static pageCount = 0;
+  pageCount = 0;
 
-  static clear = () => {
-    inputData.xmlMode.length = 0;
-    inputData.pdfMode = false;
-    inputData.imageMode = false;
-    inputData.resumeMode = false;
-    inputData.evalMode = false;
-    inputData.inputFileNames = [];
-    inputData.defaultDownloadFileName = '';
-    inputData.pageCount = 0;
-  };
+  clear() {
+    this.xmlMode.length = 0;
+    this.pdfMode = false;
+    this.pageStats = null;
+    this.ocrApplied = null;
+    this.requiresOCR = false;
+    this.imageMode = false;
+    this.resumeMode = false;
+    this.evalMode = false;
+    this.inputFileNames = [];
+    this.defaultDownloadFileName = '';
+    this.pageCount = 0;
+  }
 }

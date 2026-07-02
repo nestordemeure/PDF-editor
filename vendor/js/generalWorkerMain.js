@@ -1,4 +1,5 @@
 import { opt } from './containers/app.js';
+import { TessScheduler } from '../tess/TessScheduler.js';
 
 /**
  * Initializes a general worker and returns an object with methods controlled by the worker.
@@ -94,11 +95,14 @@ export async function initGeneralWorker() {
 
     obj.convertPageHocr = wrap('convertPageHocr');
     obj.convertPageAbbyy = wrap('convertPageAbbyy');
+    obj.convertPageAlto = wrap('convertPageAlto');
     obj.convertPageStext = wrap('convertPageStext');
     obj.convertDocTextract = wrap('convertDocTextract');
     obj.convertDocAzureDocIntel = wrap('convertDocAzureDocIntel');
+    obj.convertDocGoogleDocAI = wrap('convertDocGoogleDocAI');
     obj.convertPageGoogleVision = wrap('convertPageGoogleVision');
     obj.convertPageText = wrap('convertPageText');
+    obj.convertDocDocx = wrap('convertDocDocx');
 
     obj.optimizeFont = wrap('optimizeFont');
 
@@ -106,8 +110,6 @@ export async function initGeneralWorker() {
     obj.evalPageBase = wrap('evalPageBase');
     obj.evalWords = wrap('evalWords');
     obj.compareOCRPageImp = wrap('compareOCRPageImp');
-    obj.nudgePageFontSize = wrap('nudgePageFontSize');
-    obj.nudgePageBaseline = wrap('nudgePageBaseline');
 
     obj.reinitialize = wrap('reinitialize');
     obj.reinitialize2 = wrap('reinitialize2');
@@ -118,6 +120,7 @@ export async function initGeneralWorker() {
 
     obj.loadFontsWorker = wrap('loadFontsWorker');
     obj.updateFontContWorker = wrap('updateFontContWorker');
+    obj.dropFontsWorker = wrap('dropFontsWorker');
 
     obj.terminate = () => worker.terminate();
 
@@ -140,15 +143,9 @@ export class gs {
   /** Whether built-in fonts have been loaded in workers. */
   static loadedBuiltInFontsRawWorker = false;
 
-  /** Whether optimized fonts have been loaded in workers. */
-  static loadedBuiltInFontsOptWorker = false;
-
-  static loadedBuiltInFontsDocWorker = false;
-
   /** @type {?GeneralScheduler} */
   // static scheduler = null;
 
-  /** @type {?import('../tess/tesseract.esm.min.js').default} */
   static schedulerInner = null;
 
   /** @type {?Promise<void>} */
@@ -185,6 +182,15 @@ export class gs {
   };
 
   /**
+   * @param {Parameters<typeof import('./import/convertPageAlto.js').convertPageAlto>[0]} args
+   * @returns {ReturnType<typeof import('./import/convertPageAlto.js').convertPageAlto>}
+   */
+  static convertPageAlto = async (args) => {
+    await gs.getGeneralScheduler();
+    return gs.schedulerInner.addJob('convertPageAlto', args);
+  };
+
+  /**
    * @param {Parameters<typeof import('./import/convertDocTextract.js').convertDocTextract>[0]} args
    * @returns {ReturnType<typeof import('./import/convertDocTextract.js').convertDocTextract>}
    */
@@ -200,6 +206,24 @@ export class gs {
   static convertDocAzureDocIntel = async (args) => {
     await gs.getGeneralScheduler();
     return gs.schedulerInner.addJob('convertDocAzureDocIntel', args);
+  };
+
+  /**
+   * @param {Parameters<typeof import('./import/convertDocGoogleDocAI.js').convertDocGoogleDocAI>[0]} args
+   * @returns {ReturnType<typeof import('./import/convertDocGoogleDocAI.js').convertDocGoogleDocAI>}
+   */
+  static convertDocGoogleDocAI = async (args) => {
+    await gs.getGeneralScheduler();
+    return gs.schedulerInner.addJob('convertDocGoogleDocAI', args);
+  };
+
+  /**
+   * @param {Parameters<typeof import('./import/convertDocDocx.js').convertDocDocx>[0]} args
+   * @returns {ReturnType<typeof import('./import/convertDocDocx.js').convertDocDocx>}
+   */
+  static convertDocDocx = async (args) => {
+    await gs.getGeneralScheduler();
+    return gs.schedulerInner.addJob('convertDocDocx', args);
   };
 
   /**
@@ -239,12 +263,10 @@ export class gs {
   };
 
   /**
-   * @template {Partial<Tesseract.OutputFormats>} TO
    * @param {Object} args
-   * @param {Parameters<Tesseract.Worker['recognize']>[0]} args.image
-   * @param {Parameters<Tesseract.Worker['recognize']>[1]} args.options
-   * @param {TO} args.output
-   * @returns {Promise<Tesseract.Page<TO>>}
+   * @param {Parameters<import('../tess/TessWorker.js').TessWorker['recognize']>[0]} args.image
+   * @param {Parameters<import('../tess/TessWorker.js').TessWorker['recognize']>[1]} args.options
+   * @param {Parameters<import('../tess/TessWorker.js').TessWorker['recognize']>[2]} args.output
    * Exported for type inference purposes, should not be imported anywhere.
    */
   static recognize = async (args) => (await gs.schedulerInner.addJob('recognize', args));
@@ -296,9 +318,7 @@ export class gs {
       workerN = Math.max(Math.min(cpuN - 1, 8), 1);
     }
 
-    const Tesseract = typeof process === 'undefined' ? (await import('../tess/tesseract.esm.min.js')).default : await import('@scribe.js/tesseract.js');
-
-    gs.schedulerInner = await Tesseract.createScheduler();
+    gs.schedulerInner = new TessScheduler();
     gs.schedulerInner.workers = new Array(workerN);
 
     const addGeneralWorker = async (i) => {
@@ -348,10 +368,14 @@ export class gs {
     // A behavior (likely bug) was observed where, if the workers are loaded in parallel,
     // data will be loaded over network from all workers (rather than downloading once and caching).
     const worker0 = gs.schedulerInner.workers[0];
-    await worker0.reinitialize({ langs, vanillaMode, config });
+    await worker0.reinitialize({
+      langs, vanillaMode, config, langPath: opt.langPath,
+    });
 
     if (gs.schedulerInner.workers.length > 0) {
-      const resArr = gs.schedulerInner.workers.slice(1).map((x) => x.reinitialize({ langs, vanillaMode, config }));
+      const resArr = gs.schedulerInner.workers.slice(1).map((x) => x.reinitialize({
+        langs, vanillaMode, config, langPath: opt.langPath,
+      }));
       await Promise.allSettled(resArr);
     }
     // @ts-ignore
@@ -372,17 +396,12 @@ export class gs {
     return gs.schedulerReady;
   };
 
-  static clear = () => {
-    gs.loadedBuiltInFontsOptWorker = false;
-  };
-
   static terminate = async () => {
-    gs.clear();
     // This function can be run while the scheduler is still initializing.
     // This happens when we pre-load the scheduler, but then terminate before it finishes loading,
     // and it is never actually used.
     await gs.schedulerReady;
-    await gs.schedulerInner.terminate();
+    if (gs.schedulerInner) await gs.schedulerInner.terminate();
     gs.schedulerInner = null;
     gs.schedulerReady = null;
     gs.#resReadyTesseract = null;

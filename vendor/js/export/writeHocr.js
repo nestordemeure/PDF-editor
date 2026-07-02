@@ -1,8 +1,3 @@
-import { opt } from '../containers/app.js';
-import {
-  layoutDataTables, layoutRegions, pageMetricsAll,
-} from '../containers/dataContainer.js';
-import { FontCont } from '../containers/fontContainer.js';
 import ocr from '../objects/ocrObjects.js';
 import { round6 } from '../utils/miscUtils.js';
 
@@ -10,21 +5,38 @@ import { round6 } from '../utils/miscUtils.js';
  *
  * @param {Object} params
  * @param {Array<OcrPage>} params.ocrData
+ * @param {?Array<number>} [params.pageArr=null] - Array of 0-based page indices to include. Overrides minValue/maxValue when provided.
  * @param {number} [params.minValue]
  * @param {number} [params.maxValue]
- */
-export function writeHocr({ ocrData, minValue, maxValue }) {
-  if (minValue === null || minValue === undefined) minValue = 0;
-  if (maxValue === null || maxValue === undefined || maxValue < 0) maxValue = ocrData.length - 1;
+ * @param {import('../containers/fontContainer.js').DocFonts} [params.docFonts] - Per-document fonts. Required.
+ * @param {{ pages: Array<LayoutPage> }} [params.layoutRegions] - This document's layout regions. Required.
+ * @param {Array<PageMetrics>} [params.pageMetrics] - This document's page metrics. Required.
+ * @param {string} [params.dataTablesSerialized] - This document's serialized layout data tables. Required.
+ * @param {?import('../containers/scribeDoc.js').ScribeDoc} [params.doc=null] - Owning document for progress reporting.
+\ */
+export function writeHocr({
+  ocrData, pageArr = null, minValue, maxValue,
+  docFonts, layoutRegions: layoutRegionsArg, pageMetrics, dataTablesSerialized, doc = null,
+}) {
+  const fonts = docFonts;
+  const layoutRegionsPages = layoutRegionsArg.pages;
+  const pageMetricsArr = pageMetrics;
+
+  if (!pageArr) {
+    if (minValue === null || minValue === undefined) minValue = 0;
+    if (maxValue === null || maxValue === undefined || maxValue < 0) maxValue = ocrData.length - 1;
+    pageArr = [];
+    for (let i = minValue; i <= maxValue; i++) pageArr.push(i);
+  }
 
   const meta = {
-    'font-metrics': FontCont.state.charMetrics,
-    'default-font': FontCont.state.defaultFontName,
-    'sans-font': FontCont.state.sansDefaultName,
-    'serif-font': FontCont.state.serifDefaultName,
-    'enable-opt': opt.enableOpt,
-    layout: layoutRegions.pages,
-    'layout-data-table': layoutDataTables.serialize(),
+    'font-metrics': fonts.state.charMetrics,
+    'default-font': fonts.state.defaultFontName,
+    'sans-font': fonts.state.sansDefaultName,
+    'serif-font': fonts.state.serifDefaultName,
+    'enable-opt': fonts.state.enableOpt,
+    layout: layoutRegionsPages,
+    'layout-data-table': dataTablesSerialized,
   };
 
   let hocrOut = String.raw`<?xml version="1.0" encoding="UTF-8"?>
@@ -47,12 +59,12 @@ export function writeHocr({ ocrData, minValue, maxValue }) {
   hocrOut += '\n</head>';
   hocrOut += '\n<body>';
 
-  for (let i = minValue; i <= maxValue; i++) {
+  for (const i of pageArr) {
     const pageObj = ocrData[i];
 
     // Handle case where ocrPage object does not exist.
     if (!pageObj) {
-      hocrOut += `\n\t<div class='ocr_page' title='bbox 0 0 ${pageMetricsAll[i].dims.width} ${pageMetricsAll[i].dims.height}'>`;
+      hocrOut += `\n\t<div class='ocr_page' title='bbox 0 0 ${pageMetricsArr[i].dims.width} ${pageMetricsArr[i].dims.height}'>`;
       hocrOut += '\n\t</div>';
       continue;
     }
@@ -131,7 +143,7 @@ export function writeHocr({ ocrData, minValue, maxValue }) {
     }
     hocrOut += '\n\t</div>';
 
-    opt.progressHandler({ n: i, type: 'export', info: { } });
+    doc?.progressHandler({ n: i, type: 'export', info: { } });
   }
 
   hocrOut += '\n</body>\n</html>';

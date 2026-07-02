@@ -18,7 +18,7 @@ export async function drawWordActual(words, imageBinaryBit, angle) {
   if (!FontCont.raw) throw new Error('Fonts must be defined before running this function.');
 
   // The font/style from the first word is used for the purposes of font metrics
-  const lineFontSize = calcLineFontSize(words[0].line);
+  const lineFontSize = calcLineFontSize(words[0].line, FontCont);
 
   const fontI = FontCont.getWordFont(words[0]);
 
@@ -135,7 +135,7 @@ export const drawWordRender = async (ctx, word, offsetX = 0, cropY = 0, ctxView 
 
   let baselineY = word.line.bbox.bottom + word.line.baseline[1];
 
-  const wordMetrics = calcWordMetrics(word);
+  const wordMetrics = calcWordMetrics(word, FontCont);
   const advanceArr = wordMetrics.advanceArr;
   const kerningArr = wordMetrics.kerningArr;
   const charSpacing = wordMetrics.charSpacing;
@@ -248,29 +248,16 @@ export async function evalWords({
   let canvasView2;
   let ctxView2;
   if (view) {
-    let img;
-    if (typeof process === 'undefined') {
-      img = canvas;
-    } else {
-      img = ca.CanvasKit.MakeImage({
-        width,
-        height,
-        alphaType: ca.CanvasKit.AlphaType.Unpremul,
-        colorType: ca.CanvasKit.ColorType.RGBA_8888,
-        colorSpace: ca.CanvasKit.ColorSpace.SRGB,
-      }, imageDataActual, 4 * width);
-    }
-
     canvasView0 = await ca.createCanvas(width, height);
     ctxView0 = /** @type {OffscreenCanvasRenderingContext2D} */ (canvasView0.getContext('2d'));
-    ctxView0.drawImage(img, 0, 0);
+    ctxView0.drawImage(canvas, 0, 0);
     canvasView1 = await ca.createCanvas(width, height);
     ctxView1 = /** @type {OffscreenCanvasRenderingContext2D} */ (canvasView1.getContext('2d'));
-    ctxView1.drawImage(img, 0, 0);
+    ctxView1.drawImage(canvas, 0, 0);
     if (wordsB.length > 0) {
       canvasView2 = await ca.createCanvas(width, height);
       ctxView2 = /** @type {OffscreenCanvasRenderingContext2D} */ (canvasView2.getContext('2d'));
-      ctxView2.drawImage(img, 0, 0);
+      ctxView2.drawImage(canvas, 0, 0);
     }
   }
 
@@ -398,10 +385,10 @@ export async function evalWords({
   }
 
   if (typeof process !== 'undefined') {
-    canvas.dispose();
-    if (canvasView0) canvasView0.dispose();
-    if (canvasView1) canvasView1.dispose();
-    if (canvasView2) canvasView2.dispose();
+    ca.closeDrawable(canvas);
+    ca.closeDrawable(canvasView0);
+    ca.closeDrawable(canvasView1);
+    ca.closeDrawable(canvasView2);
   }
 
   return { metricA, metricB, debug: debugImg };
@@ -475,7 +462,7 @@ async function penalizeWord(wordObjs) {
   if (wordObjs.length === 1 && /^[a-z][.,-]$/i.test(wordStr)) {
     const word = wordObjs[0];
     const wordTextArr = wordStr.split('');
-    const wordFontSize = calcLineFontSize(word.line);
+    const wordFontSize = calcLineFontSize(word.line, FontCont);
 
     const fontI = FontCont.getWordFont(word);
     const fontOpentypeI = fontI.opentype;
@@ -879,7 +866,7 @@ export async function compareOCRPageImp({
 
                     if (wordB.style.smallCaps && !wordA.style.smallCaps) {
                       wordAClone.style.smallCaps = true;
-                      wordAClone.style.size = calcWordFontSize(wordB);
+                      wordAClone.style.size = calcWordFontSize(wordB, FontCont);
                     }
 
                     const evalRes = await evalWords({
@@ -1336,124 +1323,11 @@ export async function evalPageFont({
 }
 
 /**
- * @param {Object} params
- * @param {OcrPage} params.page
- * @param {ImageWrapper} params.binaryImage
- * @param {PageMetrics} params.pageMetricsObj
- * @param {function} params.func
- * @param {boolean} params.view
- * @returns
- */
-export async function nudgePageBase({
-  page, binaryImage, pageMetricsObj, func, view = false,
-}) {
-  // If this is not being run in a worker, clone the data so the original is not edited.
-  // This is not necessary when running in a worker, as the data is already cloned when sent to the worker.
-  if (typeof WorkerGlobalScope === 'undefined') {
-    page = structuredClone(page);
-  }
-
-  const imgAngle = binaryImage.rotated ? (pageMetricsObj.angle || 0) : 0;
-  if (binaryImage.upscaled) {
-    ocr.scalePage(page, 2);
-  }
-
-  const binaryImageBit = binaryImage.imageBitmap || await ca.getImageBitmap(binaryImage.src);
-
-  if (!FontCont.raw) throw new Error('Fonts must be defined before running this function.');
-  if (!calcCtx) throw new Error('Canvases must be defined before running this function.');
-
-  let improveCt = 0;
-  let totalCt = 0;
-
-  const debugImg = [];
-
-  for (const ocrLineJ of page.lines) {
-    const tryNudge = async (x) => {
-      const ocrLineJClone = ocr.cloneLine(ocrLineJ);
-      await func(ocrLineJClone, x);
-
-      if (!ocrLineJClone) return false;
-
-      const evalRes = await evalWords({
-        wordsA: ocrLineJ.words, wordsB: ocrLineJClone.words, binaryImage: binaryImageBit, angle: imgAngle, options: { view, useAFontSize: false, useABaseline: false },
-      });
-
-      if (evalRes.debug) debugImg.push(evalRes.debug);
-
-      if (evalRes.metricB < evalRes.metricA) {
-        return true;
-      }
-      return false;
-    };
-
-    const res1 = await tryNudge(1);
-    if (res1) {
-      await func(ocrLineJ, 1);
-      improveCt += 1;
-    } else {
-      const res2 = await tryNudge(-1);
-      if (res2) {
-        await func(ocrLineJ, -1);
-        improveCt += 1;
-      }
-    }
-
-    totalCt += 1;
-  }
-
-  return {
-    page, improveCt, totalCt, debug: view ? debugImg : null,
-  };
-}
-
-/**
- * @param {Object} params
- * @param {OcrPage} params.page
- * @param {ImageWrapper} params.binaryImage
- * @param {PageMetrics} params.pageMetricsObj
- * @param {boolean} params.view
- * @returns
- */
-export async function nudgePageFontSize({
-  page, binaryImage, pageMetricsObj, view = false,
-}) {
-  const func = async (lineJ, x) => {
-    const fontSizeBase = calcLineFontSize(lineJ);
-    if (!fontSizeBase) return;
-    lineJ._size = fontSizeBase + x;
-  };
-
-  return await nudgePageBase({
-    page, binaryImage, pageMetricsObj, func, view,
-  });
-}
-
-/**
- * @param {Object} params
- * @param {OcrPage} params.page
- * @param {ImageWrapper} params.binaryImage
- * @param {PageMetrics} params.pageMetricsObj
- * @param {boolean} params.view
- * @returns
- */
-export async function nudgePageBaseline({
-  page, binaryImage, pageMetricsObj, view = false,
-}) {
-  const func = async (lineJ, x) => {
-    lineJ.baseline[1] += x;
-  };
-
-  return await nudgePageBase({
-    page, binaryImage, pageMetricsObj, func, view,
-  });
-}
-
-/**
  * Render a page to a canvas.
  * This function is a WIP and not all options are implemented.
  * @param {Object} args
  * @param {OcrPage} args.page - Page to render.
+ * @param {number} [args.docId] - Owning document id, used by the worker dispatcher to select this document's fonts.
  * @param {ImageWrapper} [args.image]
  * @param {dims} [args.pageDims] - Dimensions of page.
  * @param {?number} [args.angle=0] - Angle of page.
@@ -1509,7 +1383,7 @@ export const renderPageStaticImp = async ({
 
       const angleAdjWord = wordObj.style.sup ? ocr.calcWordAngleAdj(wordObj) : { x: 0, y: 0 };
 
-      const wordMetrics = calcWordMetrics(wordObj);
+      const wordMetrics = calcWordMetrics(wordObj, FontCont);
       const advanceArr = wordMetrics.advanceArr;
       const kerningArr = wordMetrics.kerningArr;
       const charSpacing = wordMetrics.charSpacing;

@@ -1,6 +1,6 @@
 import { quantile } from '../utils/miscUtils.js';
 
-import opentype from '../../lib/opentype.module.js';
+import opentype from '../font-parser/src/index.js';
 
 // Defining "window" is needed due to bad browser/node detection in Opentype.js
 // Can hopefully remove in future version
@@ -154,55 +154,43 @@ const calculateKerningPairs = (font, charMetricsObj, xHeight, styleLookup) => {
  * @param {CharMetricsFont} params.charMetricsObj
  * @param {StyleLookup} params.style -
  * @param {boolean} [params.adjustAllLeftBearings] - Edit left bearings for all characters based on provided metrics.
- * @param {boolean} [params.standardizeSize] - Scale such that size of 'o' is 0.47x em size.
  * @param {?number} [params.targetEmSize] - If non-null, font is scaled to this em size.
  * @param {boolean} [params.transGlyphs] - Whether individual glyphs should be transformed based on provided metrics.
- *    If `false`, only font-level transformations (adjusting em size and standardizing 'o' height) are performed.
+ *    If `false`, only font-level transformations (adjusting em size) are performed.
  */
 export async function optimizeFont({
-  fontData, charMetricsObj, style, adjustAllLeftBearings = false, standardizeSize = false, targetEmSize = null, transGlyphs = true,
+  fontData, charMetricsObj, style, adjustAllLeftBearings = false, targetEmSize = null, transGlyphs = true,
 }) {
+  const skipTables = ['GSUB', 'GPOS', 'OS/2', 'cvt ', 'fpgm', 'prep', 'COLR', 'CPAL', 'meta'];
   /** @type {opentype.Font} */
-  const workingFont = typeof (fontData) === 'string' ? await opentype.load(fontData) : opentype.parse(fontData, { lowMemory: false });
-
-  // let workingFont;
-  // if (typeof (fontData) == "string") {
-  //   workingFont = await opentype.load(fontData);
-  // } else {
-  //   workingFont = opentype.parse(fontData, { lowMemory: false });
-  // }
+  const workingFont = typeof (fontData) === 'string'
+    ? await opentype.parse(await fetch(fontData).then((r) => r.arrayBuffer()), { skipTables })
+    : await opentype.parse(fontData, { skipTables });
 
   // Remove GSUB table (in most Latin fonts this table is responsible for ligatures, if it is used at all).
   // The presence of ligatures (such as ﬁ and ﬂ) is not properly accounted for when setting character metrics.
   workingFont.tables.gsub = null;
 
-  // Scale font to standardize x-height
-  // TODO: Make this optional or move to a separate script so the default fonts can be pre-scaled.
-  const xHeightStandard = 0.47 * workingFont.unitsPerEm;
-  let oGlyph = workingFont.charToGlyph('o').getMetrics();
-  let xHeight = oGlyph.yMax - oGlyph.yMin;
-  const xHeightScale = xHeightStandard / xHeight;
-  const scaleGlyph = (x) => x * xHeightScale;
-  if (Math.abs(1 - xHeightScale) > 0.01) {
-    if (standardizeSize) {
-      for (const [key, value] of Object.entries(workingFont.glyphs.glyphs)) {
-        transformGlyph(value, scaleGlyph, true, true);
-      }
-    } else {
-      console.log("Font is not standard size ('o' 0.47x em size).  Either standardize the font ahead of time or enable `standardizeSize = true` to standardize on the fly.");
-    }
-  }
-
   if (targetEmSize && targetEmSize !== workingFont.unitsPerEm) {
-    for (const [key, value] of Object.entries(workingFont.glyphs.glyphs)) {
-      transformGlyph(value, (x) => x * (targetEmSize / workingFont.unitsPerEm), true, true);
+    for (let i = 0; i < workingFont.glyphs.length; i++) {
+      transformGlyph(workingFont.glyphs.get(i), (x) => x * (targetEmSize / workingFont.unitsPerEm), true, true);
     }
     workingFont.unitsPerEm = targetEmSize;
   }
 
+  let oGlyph = workingFont.charToGlyph('o').getMetrics();
+  let xHeight = oGlyph.yMax - oGlyph.yMin;
+
+  // Detect monospace before any early return so kerning can be skipped.
+  // A monospace font has identical advance widths for narrow ('i') and wide ('m') characters.
+  const monoGlyphI = workingFont.charToGlyph('i');
+  const monoGlyphM = workingFont.charToGlyph('m');
+  const isMonospace = monoGlyphI?.advanceWidth > 0 && monoGlyphI.advanceWidth === monoGlyphM?.advanceWidth;
+  const monoAdvanceWidth = isMonospace ? monoGlyphI.advanceWidth : 0;
+
   // If no glyph-level transformations are requested, return early.
-  if (!transGlyphs) {
-    workingFont.kerningPairs = calculateKerningPairs(workingFont, charMetricsObj, xHeight, style);
+  if (!transGlyphs && !isMonospace) {
+    workingFont.kerningPairs = isMonospace ? {} : calculateKerningPairs(workingFont, charMetricsObj, xHeight, style);
 
     return { fontData: workingFont.toArrayBuffer(), kerningPairs: workingFont.kerningPairs };
   }
@@ -303,6 +291,26 @@ export async function optimizeFont({
     glyphI.leftSideBearing = glyphIMetrics.xMin;
   }
 
+  // For monospace fonts, enforce a uniform advance width across all glyphs.
+  if (isMonospace) {
+    const ocrWidthValues = Object.values(charMetricsObj.width).filter((v) => v > 0);
+    if (ocrWidthValues.length > 0) {
+      const medianOcrWidth = quantile(ocrWidthValues, 0.5);
+      const targetAdvance = Math.round(medianOcrWidth * xHeight);
+      const originalMonoAdvance = monoAdvanceWidth;
+
+      // Limit to +/-30% of original advance width, matching the general scaling limits.
+      const uniformAdvance = Math.round(Math.max(Math.min(targetAdvance, originalMonoAdvance * 1.3), originalMonoAdvance * 0.7));
+
+      for (let i = 0; i < workingFont.glyphs.length; i++) {
+        const glyph = workingFont.glyphs.get(i);
+        if (glyph.advanceWidth > 0) {
+          glyph.advanceWidth = uniformAdvance;
+        }
+      }
+    }
+  }
+
   // Adjust height for capital letters (if heightCaps is believable)
   if (heightCapsBelievable) {
     const capsMult = xHeight * charMetricsObj.heightCaps / fontAscHeight;
@@ -391,7 +399,7 @@ export async function optimizeFont({
     }
   }
 
-  workingFont.kerningPairs = calculateKerningPairs(workingFont, charMetricsObj, xHeight, style);
+  workingFont.kerningPairs = isMonospace ? {} : calculateKerningPairs(workingFont, charMetricsObj, xHeight, style);
 
   // Append suffix to avoid naming conflict with raw font.
   // This is necessary for the Node.js version due to quirks with node-canvas.

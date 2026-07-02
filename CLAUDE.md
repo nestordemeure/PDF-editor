@@ -34,6 +34,7 @@ At save time, PDF.js renders on the main thread (pipelined, `SAVE_RENDER_CONCURR
 - **Flate-compress raw images in the encode step (in the worker), never at embed time** — lossless saves of a long book would otherwise hold gigabytes of raw pixels.
 - **OCR embedding relies on a pdf-lib quirk**: `page.scaleContent()` caches the content stream *inside* the scale wrapper, so images drawn afterwards share the transform — that's why the image is drawn at the OCR page's original size, not the target size. Don't "simplify" this.
 - The base-thumbnail cache (`baseThumbnailCache`) must hold the **pre-operation** render; it is what lets pixel-effect changes and deep undo skip PDF.js entirely.
+- OCR (`runOcr`) sets `scribe.opt.workerN` to most of the machine's cores **before** `scribe.init` — scribe's own default caps at 6 tesseract workers and leaves big CPUs idle. Recognition is CPU-bound WASM; there is no GPU path.
 
 ## Encodings
 
@@ -51,7 +52,7 @@ cp node_modules/ts-ccitt-g4-encoder/dist/index.mjs vendor/ccitt-g4-encoder.mjs
 cp node_modules/pako/dist/pako.mjs vendor/pako.mjs
 cp node_modules/@jsquash/jpeg/{encode.js,meta.js,utils.js} vendor/jsquash-jpeg/
 cp node_modules/@jsquash/jpeg/codec/enc/mozjpeg_enc.{js,wasm} vendor/jsquash-jpeg/codec/enc/
-# scribe.js OCR (AGPL): scribe.js + js/ lib/ tess/ fonts/ mupdf/ -> vendor/
+# scribe.js OCR (AGPL): scribe.js + js/ lib/ tess/ fonts/ -> vendor/
 ```
 
 Copy each package's LICENSE alongside (see existing `vendor/LICENSE-*` files).

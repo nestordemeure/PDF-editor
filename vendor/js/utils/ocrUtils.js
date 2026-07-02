@@ -1,14 +1,14 @@
-import { opt } from '../containers/app.js';
+import { scribeDocDefaults } from '../containers/scribeDocDefaults.js';
 import ocr from '../objects/ocrObjects.js';
 import { calcWordMetrics } from './fontUtils.js';
-import { calcBboxUnion } from './miscUtils.js';
+import { calcBboxUnion, getRandomAlphanum } from './miscUtils.js';
 
 /**
- *
+ * Count words above the high-confidence threshold across `pages`.
  * @param {Array<OcrPage>} pages
- * @returns
+ * @param {number} [confThreshHigh]
  */
-export const calcConf = (pages) => {
+export const calcConf = (pages, confThreshHigh = scribeDocDefaults.confThreshHigh) => {
   let wordsTotal = 0;
   let wordsHighConf = 0;
   for (let i = 0; i < pages.length; i++) {
@@ -16,7 +16,7 @@ export const calcConf = (pages) => {
     for (let j = 0; j < words.length; j++) {
       const word = words[j];
       wordsTotal += 1;
-      if (word.conf > opt.confThreshHigh) wordsHighConf += 1;
+      if (word.conf > confThreshHigh) wordsHighConf += 1;
     }
   }
   return { total: wordsTotal, highConf: wordsHighConf };
@@ -26,9 +26,11 @@ export const calcConf = (pages) => {
  *
  * @param {OcrWord} word
  * @param {number} splitIndex
+ * @param {import('../containers/fontContainer.js').DocFonts} docFonts - Fonts used to estimate the
+ *   split point when character-level metrics are missing or unreliable.
  * @returns
  */
-export function splitOcrWord(word, splitIndex) {
+export function splitOcrWord(word, splitIndex, docFonts) {
   const wordA = ocr.cloneWord(word);
   const wordB = ocr.cloneWord(word);
 
@@ -47,7 +49,7 @@ export function splitOcrWord(word, splitIndex) {
 
   // TODO: This is a quick fix; figure out how to get this math correct.
   if (!validCharData) {
-    const metrics = calcWordMetrics(wordA);
+    const metrics = calcWordMetrics(wordA, docFonts);
     wordA.bbox.right -= metrics.advanceArr.slice(splitIndex).reduce((a, b) => a + b, 0);
     wordB.bbox.left = wordA.bbox.right;
   }
@@ -119,6 +121,11 @@ export const splitLineAgressively = (line) => {
   linesOut.forEach((x) => {
     ocr.updateLineBbox(x);
   });
+
+  // Generate new IDs for all split lines except the first (which keeps the original ID)
+  for (let i = 1; i < linesOut.length; i++) {
+    linesOut[i].id = getRandomAlphanum(8);
+  }
 
   return linesOut;
 };

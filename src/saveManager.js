@@ -271,37 +271,12 @@ async function renderAllPages({ pages, getPdfDocForPage, jpegQuality = 0.85, com
  * Runs OCR on rendered pages using scribe.js
  */
 async function runOcr({ renderedPages, lang, onProgress, onStatus, scribeModule }) {
+  let doc = null;
   try {
-    await scribeModule.init({ ocr: true, font: true, pdf: true });
-    scribeModule.opt.displayMode = "ebook";
-    scribeModule.opt.intermediatePDF = false;
-
-    const stageOrder = ["importImage", "convert", "export"];
-    const totalSteps = Math.max(1, renderedPages.length * stageOrder.length);
-    let maxProgress = 0;
-
-    scribeModule.opt.progressHandler = (message) => {
-      if (!message || typeof message.n !== "number") return;
-      const stage = message.type || "ocr";
-      const stageIndex = Math.max(0, stageOrder.indexOf(stage));
-      const stepInStage = Math.min(message.n + 1, renderedPages.length);
-      const overallStep = Math.min(stageIndex * renderedPages.length + stepInStage, totalSteps);
-
-      // Ensure progress never decreases (monotonic)
-      maxProgress = Math.max(maxProgress, overallStep);
-      if (onProgress) onProgress(maxProgress, totalSteps);
-
-      // Derive displayed stage and step from maxProgress for monotonic status text
-      const displayStageIndex = Math.min(Math.floor((maxProgress - 1) / renderedPages.length), stageOrder.length - 1);
-      const displayStep = maxProgress - displayStageIndex * renderedPages.length;
-      const displayStage = stageOrder[displayStageIndex] || "convert";
-
-      let stageMessage = "Processing...";
-      if (displayStage === "importImage") stageMessage = `OCR: loading images ${displayStep}/${renderedPages.length}`;
-      if (displayStage === "convert") stageMessage = `OCR: recognizing ${displayStep}/${renderedPages.length}`;
-      if (displayStage === "export") stageMessage = `OCR: generating PDF ${displayStep}/${renderedPages.length}`;
-      if (onStatus) onStatus(stageMessage);
-    };
+    // Use most of the machine for recognition (scribe's default caps at 6
+    // workers); must be set before init
+    scribeModule.opt.workerN = Math.max(1, Math.min((navigator.hardwareConcurrency || 4) - 2, 12));
+    await scribeModule.init({ ocr: true, font: true });
 
     // Convert to File objects for scribe.js
     const imageFiles = renderedPages.map((page, index) => {
@@ -310,10 +285,29 @@ async function runOcr({ renderedPages, lang, onProgress, onStatus, scribeModule 
       return new File([blob], `page_${String(index + 1).padStart(4, "0")}.${extension}`, { type: page.ocrMime });
     });
 
-    await scribeModule.importFiles({ imageFiles });
-    await scribeModule.recognize({ langs: [lang] });
-    const textPdf = await scribeModule.exportData("pdf");
-    await scribeModule.clear();
+    doc = new scribeModule.ScribeDoc();
+
+    // Progress: 'convert' messages arrive as pages finish recognition,
+    // 'export' while writing the PDF; keep the reported progress monotonic
+    const pageCount = renderedPages.length;
+    const totalSteps = pageCount * 2;
+    let recognized = 0;
+    let exported = 0;
+    doc.progressHandler = (message) => {
+      if (!message || typeof message.n !== "number") return;
+      if (message.type === "convert") recognized = Math.max(recognized, Math.min(message.n + 1, pageCount));
+      if (message.type === "export") exported = Math.max(exported, Math.min(message.n + 1, pageCount));
+      if (onProgress) onProgress(recognized + exported, totalSteps);
+      if (onStatus) {
+        onStatus(exported > 0
+          ? `OCR: generating PDF ${exported}/${pageCount}`
+          : `OCR: recognizing ${recognized}/${pageCount}`);
+      }
+    };
+
+    await doc.importFiles(imageFiles);
+    await doc.recognize({ langs: [lang] });
+    const textPdf = await doc.exportData("pdf", { displayMode: "ebook" });
 
     if (!textPdf) return null;
     if (textPdf instanceof Uint8Array) return textPdf;
@@ -324,6 +318,8 @@ async function runOcr({ renderedPages, lang, onProgress, onStatus, scribeModule 
   } catch (error) {
     console.error("OCR failed:", error);
     return null;
+  } finally {
+    if (doc) await doc.terminate().catch(() => {});
   }
 }
 

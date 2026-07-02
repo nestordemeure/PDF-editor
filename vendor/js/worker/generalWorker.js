@@ -1,40 +1,42 @@
 import { convertPageAbbyy } from '../import/convertPageAbbyy.js';
+import { convertPageAlto } from '../import/convertPageAlto.js';
 import { convertPageBlocks } from '../import/convertPageBlocks.js';
 import { convertPageHocr } from '../import/convertPageHocr.js';
 import { convertPageStext } from '../import/convertPageStext.js';
 import { convertDocTextract } from '../import/convertDocTextract.js';
 import { convertDocAzureDocIntel } from '../import/convertDocAzureDocIntel.js';
+import { convertDocGoogleDocAI } from '../import/convertDocGoogleDocAI.js';
 import { convertPageGoogleVision } from '../import/convertPageGoogleVision.js';
 import { convertPageText } from '../import/convertPageText.js';
+import { convertDocDocx } from '../import/convertDocDocx.js';
 
-import { FontCont, loadFontsFromSource } from '../containers/fontContainer.js';
+import {
+  DocFonts, GlobalFonts, loadFontsFromSource, setActiveDocFonts, unregisterFontFacesMatching,
+} from '../containers/fontContainer.js';
+import { ca } from '../canvasAdapter.js';
 import {
   compareOCRPageImp,
   evalPageBase,
   evalPageFont,
   evalWords,
-  nudgePageBaseline,
-  nudgePageFontSize,
   renderPageStaticImp,
 } from './compareOCRModule.js';
 import { optimizeFont } from './optimizeFontModule.js';
+import { TessWorker } from '../../tess/TessWorker.js';
 
 const parentPort = typeof process === 'undefined' ? globalThis : (await import('node:worker_threads')).parentPort;
 if (!parentPort) throw new Error('This file must be run in a worker');
-
-const Tesseract = typeof process === 'undefined' ? (await import('../../tess/tesseract.esm.min.js')).default : await import('@scribe.js/tesseract.js');
 
 // TODO: Add back support for multiple PSM modes.
 // There is already an advanced option in the UI that claims to switch this, but it currently does nothing.
 // tessedit_pageseg_mode: Tesseract.PSM["SINGLE_COLUMN"],
 
 const defaultConfigsVanilla = {
-  tessedit_pageseg_mode: Tesseract.PSM.AUTO,
+  tessedit_pageseg_mode: TessWorker.PSM.AUTO,
 };
 
 const defaultConfigs = {
-  tessedit_pageseg_mode: Tesseract.PSM.AUTO,
-
+  tessedit_pageseg_mode: TessWorker.PSM.AUTO,
   // This is virtually always a false positive (usually "I").
   tessedit_char_blacklist: '|',
   // This option disables an undesirable behavior where Tesseract categorizes blobs *of any size* as noise,
@@ -62,36 +64,46 @@ let langArrCurrent = ['eng'];
 
 let vanillaMode_ = false;
 
-// Explicitly setting these paths with `URL` is necessary for this to work with Webpack.
-// While Tesseract.js users are advised to always point `corePath` to a directory rather than a file,
-// pointing to a file should be fined here.
-// First, we never want to use the LSTM-only version, as every recognition mode (aside from some fringe advanced options) use the Legacy engine.
-// Second, >99% of devices now support the SIMD version, so only using the SIMD version is fine.
-let corePath;
-if (vanillaMode_) {
-  corePath = new URL('../../tess/core_vanilla/tesseract-core-simd.wasm.js', import.meta.url).href;
-} else {
-  corePath = new URL('../../tess/core/tesseract-core-simd.wasm.js', import.meta.url).href;
-}
-
-const workerPath = new URL('../../tess/worker.min.js', import.meta.url).href;
-
 // Custom build is currently only used for browser version, while the Node.js version uses the published npm package.
 // If recognition capabilities are ever added for the Node.js version, then we should use the same build for consistency. .
 const tessOptions = typeof process === 'undefined' ? {
-  corePath,
-  workerPath,
-  // langPath: '/tess/tessdata_dist',
   legacyCore: true,
   legacyLang: true,
   workerBlobURL: false,
 } : { legacyCore: true, legacyLang: true };
 
-/** @type {?Tesseract.Worker} */
+/** @type {?TessWorker} */
 let worker;
 
+/** @type {?TessWorker} */
 let workerLegacy;
+/** @type {?TessWorker} */
 let workerLSTM;
+
+// Per-document font state, keyed by document id. The built-in raw fonts are shared globally on
+// `GlobalFonts`; only per-document fonts/metrics/settings live here.
+// Font-dependent jobs carry their `docId` and the dispatcher points `setActiveDocFonts` at the matching entry before the job runs.
+// This is safe without a lock because the scheduler runs one compute job per worker at a time,
+// and font-load/state messages only write their own entry (they never repoint the active pointer).
+/** @type {Map<number, DocFonts>} */
+const workerFonts = new Map();
+
+/** @param {number} [docId] */
+const getWorkerFonts = (docId) => {
+  const key = docId ?? 0;
+  let docFonts = workerFonts.get(key);
+  if (!docFonts) {
+    docFonts = new DocFonts();
+    docFonts.id = key;
+    workerFonts.set(key, docFonts);
+  }
+  return docFonts;
+};
+
+const fontDependentFuncs = new Set([
+  'compareOCRPageImp', 'evalPageBase', 'evalWords', 'evalPageFont', 'renderPageStaticImp',
+  'convertDocDocx',
+]);
 
 /**
  * Function to change language, OEM, and vanilla mode.
@@ -103,10 +115,15 @@ let workerLSTM;
  * @param {?number} param.oem
  * @param {?boolean} param.vanillaMode
  * @param {Object<string, string>} param.config - Config params to pass to to Tesseract.js.
+ * @param {?string} [param.langPath] - Custom path/URL to load `.traineddata` files from.
+ *   Forwarded to `tessOptions.langPath` so subsequent worker creates load language data
+ *   from this location instead of the default CDN. `null`/`undefined` leaves the current
+ *   value unchanged.
  */
 const reinitialize = async ({
-  langs, oem, vanillaMode, config,
+  langs, oem, vanillaMode, config, langPath,
 }) => {
+  if (langPath !== undefined && langPath !== null) tessOptions.langPath = langPath;
   const langArr = typeof langs === 'string' ? langs.split('+') : langs;
   const changeLang = langs && JSON.stringify(langArr.sort()) !== JSON.stringify(langArrCurrent.sort());
   // oem can be 0, so using "truthy" checks does not work
@@ -140,13 +157,13 @@ const reinitialize = async ({
   // or if it was never created in the first place.
   if (changeVanilla || !worker) {
     if (vanillaMode_) {
-      tessOptions.corePath = new URL('../../tess/core_vanilla/tesseract-core-simd.wasm.js', import.meta.url).href;
+      tessOptions.vanillaEngine = true;
     } else {
-      tessOptions.corePath = new URL('../../tess/core/tesseract-core-simd.wasm.js', import.meta.url).href;
+      tessOptions.vanillaEngine = false;
     }
 
     if (worker) await worker.terminate();
-    worker = await Tesseract.createWorker(langArrCurrent, oemCurrent, tessOptions, initConfigs);
+    worker = await TessWorker.create(langArrCurrent, oemCurrent, tessOptions, initConfigs);
   } else {
     await worker.reinitialize(langArrCurrent, oemCurrent, initConfigs);
   }
@@ -163,8 +180,10 @@ const reinitialize = async ({
  * @param {?Array<string>} param.langs
  * @param {?number} param.oem
  * @param {?boolean} param.vanillaMode
+ * @param {?string} [param.langPath] - Custom path/URL to load `.traineddata` files from.
  */
-const reinitialize2 = async ({ langs, vanillaMode }) => {
+const reinitialize2 = async ({ langs, vanillaMode, langPath }) => {
+  if (langPath !== undefined && langPath !== null) tessOptions.langPath = langPath;
   const langArr = typeof langs === 'string' ? langs.split('+') : langs;
   const changeLang = langs && JSON.stringify(langArr.sort()) !== JSON.stringify(langArrCurrent.sort());
   const changeVanilla = vanillaMode && vanillaMode !== vanillaMode_;
@@ -179,9 +198,9 @@ const reinitialize2 = async ({ langs, vanillaMode }) => {
   // or if it was never created in the first place.
   if (changeVanilla || !workerLegacy || !workerLSTM) {
     if (vanillaMode_) {
-      tessOptions.corePath = new URL('../../tess/core_vanilla/tesseract-core-simd.wasm.js', import.meta.url).href;
+      tessOptions.vanillaEngine = true;
     } else {
-      tessOptions.corePath = new URL('../../tess/core/tesseract-core-simd.wasm.js', import.meta.url).href;
+      tessOptions.vanillaEngine = false;
     }
 
     if (workerLegacy) {
@@ -195,8 +214,8 @@ const reinitialize2 = async ({ langs, vanillaMode }) => {
       workerLSTM = null;
     }
 
-    workerLegacy = await Tesseract.createWorker(langArrCurrent, 0, tessOptions, initConfigs);
-    workerLSTM = await Tesseract.createWorker(langArrCurrent, 1, tessOptions, initConfigs);
+    workerLegacy = await TessWorker.create(langArrCurrent, 0, tessOptions, initConfigs);
+    workerLSTM = await TessWorker.create(langArrCurrent, 1, tessOptions, initConfigs);
   } else if (changeLang) {
     await workerLegacy.reinitialize(langArrCurrent, 0, initConfigs);
     await workerLSTM.reinitialize(langArrCurrent, 1, initConfigs);
@@ -214,7 +233,7 @@ const reinitialize2 = async ({ langs, vanillaMode }) => {
  * @param {Object} params -
  * @param {ArrayBuffer} params.image -
  * @param {Object} params.options -
- * @param {Parameters<Tesseract.Worker['recognize']>[2]} params.output
+ * @param {Parameters<TessWorker['recognize']>[2]} params.output
  * @param {number} params.n -
  * @param {dims} params.pageDims - Original (unrotated) dimensions of input image.
  * @param {?number} [params.knownAngle] - The known angle, or `null` if the angle is not known at the time of recognition.
@@ -232,7 +251,11 @@ export const recognizeAndConvert = async ({
 
   const keepItalic = oemCurrent === 0;
 
-  const ocrBlocks = /** @type {Array<import('@scribe.js/tesseract.js').Block>} */(res1.data.blocks);
+  const ocrBlocks = res1.data.blocks;
+
+  if (!ocrBlocks) {
+    throw new Error('No OCR blocks returned from recognition.');
+  }
 
   const res2 = await convertPageBlocks({
     ocrBlocks, n, pageDims, rotateAngle: angle, keepItalic,
@@ -247,7 +270,7 @@ export const recognizeAndConvert = async ({
  * @param {Object} params -
  * @param {ArrayBuffer} params.image -
  * @param {Object} params.options -
- * @param {Parameters<Tesseract.Worker['recognize']>[2]} params.output
+ * @param {Parameters<TessWorker['recognize']>[2]} params.output
  * @param {number} params.n -
  * @param {dims} params.pageDims - Original (unrotated) dimensions of input image.
  * @param {?number} [params.knownAngle] - The known angle, or `null` if the angle is not known at the time of recognition.
@@ -255,10 +278,19 @@ export const recognizeAndConvert = async ({
  * Exported for type inference purposes, should not be imported anywhere.
  */
 export const recognizeAndConvert2 = async ({
-  image, options, output, n, pageDims, knownAngle = null,
+  image, options, output, n, pageDims, knownAngle = null, langs = null, vanillaMode = false,
 }, id) => {
-  if (!worker && !(workerLegacy && workerLSTM)) throw new Error('Worker not initialized');
+  // Ensure this worker's Tesseract engine matches the job's language before recognizing.
+  // This makes the config part of the job (not a separate broadcast another document could race),
+  // so documents in different languages can share the pool.
+  // `reinitialize` early-returns when the config is unchanged, so same-language documents pay nothing.
+  if (langs) {
+    await reinitialize({
+      langs, oem: null, vanillaMode: vanillaMode || null, config: {},
+    });
+  }
 
+  const startTime = performance.now();
   // Disable output formats that are not used.
   // Leaving these enabled can significantly inflate runtimes for no benefit.
   if (!output) output = {};
@@ -285,8 +317,10 @@ export const recognizeAndConvert2 = async ({
       const res2Promise = workerLSTM.recognize(image, options, output);
       resArr = [res1Promise, res2Promise];
     }
-  } else {
+  } else if (worker) {
     resArr = await worker.recognize2(image, options, output);
+  } else {
+    throw new Error('Worker not initialized');
   }
 
   const res0 = await resArr[0];
@@ -296,14 +330,16 @@ export const recognizeAndConvert2 = async ({
   let resLegacy;
   let resLSTM;
   if (options.lstm && options.legacy) {
-    const legacyBlocks = /** @type {Array<import('@scribe.js/tesseract.js').Block>} */(res0.data.blocks);
+    const legacyBlocks = res0.data.blocks;
+    if (!legacyBlocks) throw new Error('No OCR blocks returned from recognition.');
     resLegacy = await convertPageBlocks({
       ocrBlocks: legacyBlocks, n, pageDims, rotateAngle: angle, keepItalic: true, upscale: res0.data.upscale,
     });
     (async () => {
       const res1 = await resArr[1];
 
-      const lstmBlocks = /** @type {Array<import('@scribe.js/tesseract.js').Block>} */(res1.data.blocks);
+      const lstmBlocks = res1.data.blocks;
+      if (!lstmBlocks) throw new Error('No OCR blocks returned from recognition.');
       resLSTM = await convertPageBlocks({
         ocrBlocks: lstmBlocks, n, pageDims, rotateAngle: angle, keepItalic: false, upscale: res0.data.upscale,
       });
@@ -313,18 +349,22 @@ export const recognizeAndConvert2 = async ({
       parentPort.postMessage({ data: xB, id: `${id}b`, status: 'resolve' });
     })();
   } else if (!options.lstm && options.legacy) {
-    const legacyBlocks = /** @type {Array<import('@scribe.js/tesseract.js').Block>} */(res0.data.blocks);
+    const legacyBlocks = res0.data.blocks;
+    if (!legacyBlocks) throw new Error('No OCR blocks returned from recognition.');
     resLegacy = await convertPageBlocks({
       ocrBlocks: legacyBlocks, n, pageDims, rotateAngle: angle, keepItalic: true, upscale: res0.data.upscale,
     });
   } else if (options.lstm && !options.legacy) {
-    const lstmBlocks = /** @type {Array<import('@scribe.js/tesseract.js').Block>} */(res0.data.blocks);
+    const lstmBlocks = res0.data.blocks;
+    if (!lstmBlocks) throw new Error('No OCR blocks returned from recognition.');
     resLSTM = await convertPageBlocks({
       ocrBlocks: lstmBlocks, n, pageDims, rotateAngle: angle, keepItalic: false, upscale: res0.data.upscale,
     });
   }
 
-  const x = { recognize: res0.data, convert: { legacy: resLegacy, lstm: resLSTM } };
+  const elapsedTime = performance.now() - startTime;
+
+  const x = { recognize: res0.data, convert: { legacy: resLegacy, lstm: resLSTM }, recognitionTime: elapsedTime };
 
   parentPort.postMessage({ data: x, id, status: 'resolve' });
 
@@ -333,12 +373,10 @@ export const recognizeAndConvert2 = async ({
 };
 
 /**
- * @template {Partial<Tesseract.OutputFormats>} TO
  * @param {Object} args
- * @param {Parameters<Tesseract.Worker['recognize']>[0]} args.image
- * @param {Parameters<Tesseract.Worker['recognize']>[1]} args.options
- * @param {TO} args.output
- * @returns {Promise<Tesseract.Page<TO>>}
+ * @param {Parameters<TessWorker['recognize']>[0]} args.image
+ * @param {Parameters<TessWorker['recognize']>[1]} args.options
+ * @param {Parameters<TessWorker['recognize']>[2]} args.output
  * Exported for type inference purposes, should not be imported anywhere.
  */
 export const recognize = async ({ image, options, output }) => {
@@ -348,38 +386,67 @@ export const recognize = async ({ image, options, output }) => {
 };
 
 /**
- * Sets font data in `fontAll`.
- * Used to set font data in workers.
+ * Set font data in this worker.
+ * Built-in raw fonts (`kind` unset and `opt` false) are stored globally.
+ * Optimized and document fonts are stored per document under `docId`.
  * @param {Object} args
  * @param {Parameters<loadFontsFromSource>[0]} args.src
  * @param {Parameters<loadFontsFromSource>[1]} args.opt
+ * @param {number} [args.docId]
+ * @param {('raw'|'opt'|'doc')} [args.kind]
  */
-async function loadFontsWorker({ src, opt }) {
-  const fonts = await loadFontsFromSource(src, opt);
-  if (opt) {
-    if (FontCont.opt) {
-      Object.assign(FontCont.opt, fonts);
-    } else {
-      FontCont.opt = fonts;
-    }
-  } else if (FontCont.raw) {
-    Object.assign(FontCont.raw, fonts);
+async function loadFontsWorker({
+  src, opt, docId, kind,
+}) {
+  const fonts = await loadFontsFromSource(src, opt, docId);
+  if (kind === 'opt' || (kind === undefined && opt)) {
+    const docFonts = getWorkerFonts(docId);
+    docFonts.opt = docFonts.opt ? Object.assign(docFonts.opt, fonts) : fonts;
+  } else if (kind === 'doc') {
+    const docFonts = getWorkerFonts(docId);
+    docFonts.doc = docFonts.doc ? Object.assign(docFonts.doc, fonts) : fonts;
   } else {
-    FontCont.raw = fonts;
+    GlobalFonts.raw = GlobalFonts.raw ? Object.assign(GlobalFonts.raw, fonts) : fonts;
   }
   return true;
 }
 
+/**
+ * @param {Object} args
+ * @param {number} [args.docId]
+ * @param {?Awaited<ReturnType<import('../fontEval.js').evaluateFonts>>} [args.rawMetrics]
+ * @param {?Awaited<ReturnType<import('../fontEval.js').evaluateFonts>>} [args.optMetrics]
+ * @param {string} [args.defaultFontName]
+ * @param {string} [args.sansDefaultName]
+ * @param {string} [args.serifDefaultName]
+ * @param {boolean} [args.enableOpt]
+ * @param {boolean} [args.forceOpt]
+ */
 async function updateFontContWorker({
-  rawMetrics, optMetrics, defaultFontName, sansDefaultName, serifDefaultName, enableOpt, forceOpt,
+  docId, rawMetrics, optMetrics, defaultFontName, sansDefaultName, serifDefaultName, enableOpt, forceOpt,
 }) {
-  if (sansDefaultName) FontCont.state.sansDefaultName = sansDefaultName;
-  if (serifDefaultName) FontCont.state.serifDefaultName = serifDefaultName;
-  if (defaultFontName) FontCont.state.defaultFontName = defaultFontName;
-  if (rawMetrics) FontCont.rawMetrics = rawMetrics;
-  if (optMetrics) FontCont.optMetrics = optMetrics;
-  if (enableOpt === true || enableOpt === false) FontCont.state.enableOpt = enableOpt;
-  if (forceOpt === true || forceOpt === false) FontCont.state.forceOpt = forceOpt;
+  const docFonts = getWorkerFonts(docId);
+  if (sansDefaultName) docFonts.state.sansDefaultName = sansDefaultName;
+  if (serifDefaultName) docFonts.state.serifDefaultName = serifDefaultName;
+  if (defaultFontName) docFonts.state.defaultFontName = defaultFontName;
+  if (rawMetrics) docFonts.rawMetrics = rawMetrics;
+  if (optMetrics) docFonts.optMetrics = optMetrics;
+  if (enableOpt === true || enableOpt === false) docFonts.state.enableOpt = enableOpt;
+  if (forceOpt === true || forceOpt === false) docFonts.state.forceOpt = forceOpt;
+}
+
+/**
+ * Drop a document's per-document fonts from this worker and unregister its optimized FontFaces.
+ * The process-wide raw fonts (shared across all documents) are left intact.
+ * @param {Object} args
+ * @param {number} [args.docId]
+ */
+async function dropFontsWorker({ docId }) {
+  const key = docId ?? 0;
+  workerFonts.delete(key);
+  ca.unregisterFontsMatching((name) => name.endsWith(` Opt d${key}`));
+  unregisterFontFacesMatching((family) => family.endsWith(` Opt d${key}`));
+  return true;
 }
 
 async function compareOCRPageImpWrap(args) {
@@ -392,6 +459,9 @@ const handleMessage = async (data) => {
   const args = data[1];
   const id = data[2];
 
+  // Point font lookups at the requesting document's fonts before the job runs.
+  if (fontDependentFuncs.has(func)) setActiveDocFonts(getWorkerFonts(args?.docId));
+
   if (func === 'recognizeAndConvert2') {
     recognizeAndConvert2(args, id);
     return;
@@ -400,13 +470,16 @@ const handleMessage = async (data) => {
   ({
     // Convert page functions
     convertPageAbbyy,
+    convertPageAlto,
     convertPageHocr,
     convertPageStext,
     convertDocTextract,
     convertDocAzureDocIntel,
+    convertDocGoogleDocAI,
     convertPageGoogleVision,
     convertPageBlocks,
     convertPageText,
+    convertDocDocx,
 
     // Optimize font functions
     optimizeFont,
@@ -416,8 +489,6 @@ const handleMessage = async (data) => {
     evalPageBase,
     evalWords,
     compareOCRPageImp: compareOCRPageImpWrap,
-    nudgePageFontSize,
-    nudgePageBaseline,
     renderPageStaticImp,
 
     // Recognition
@@ -429,6 +500,7 @@ const handleMessage = async (data) => {
     // Change state of worker
     loadFontsWorker,
     updateFontContWorker,
+    dropFontsWorker,
   })[func](args)
     .then((x) => parentPort.postMessage({ data: x, id, status: 'resolve' }))
     .catch((err) => parentPort.postMessage({ data: err, id, status: 'reject' }));

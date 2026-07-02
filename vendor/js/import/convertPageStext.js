@@ -14,6 +14,8 @@ import { LayoutDataTablePage } from '../objects/layoutObjects.js';
 import { detectTablesInPage, makeTableFromBbox } from '../utils/detectTables.js';
 import { splitLineAgressively } from '../utils/ocrUtils.js';
 
+const debugMode = false;
+
 /**
  * @param {Object} params
  * @param {string} params.ocrStr
@@ -78,7 +80,7 @@ export async function convertPageStext({ ocrStr, n }) {
 
       // Unlike Tesseract, stext does not have a native "word" unit (it provides only lines and letters).
       // Therefore, lines are split into words on either (1) a space character or (2) a change in formatting.
-      const wordStrArr = xmlLine.split(/(?:<char[^>]*?c=['"]\s+['"]\/>)/ig);
+      const wordStrArr = xmlLine.split(/(?:<char[^>]*?c=['"]\s+['"]\s*\/>)/ig);
       // If the last element is a closing font tag, remove it.
       if (wordStrArr[wordStrArr.length - 1] && wordStrArr[wordStrArr.length - 1].trim() === '</font>') wordStrArr.pop();
 
@@ -508,7 +510,9 @@ export async function convertPageStext({ ocrStr, n }) {
 
       lineObj.orientation = orientation;
 
-      lineObj.raw = xmlLine;
+      if (debugMode) {
+        lineObj.debug.raw = xmlLine;
+      }
 
       let lettersKept = 0;
       for (let i = 0; i < textArr.length; i++) {
@@ -598,7 +602,9 @@ export async function convertPageStext({ ocrStr, n }) {
           wordObj.style.bold = true;
         }
 
-        wordObj.raw = wordStrArr[wordLetterOrFontArrIndex[i]];
+        if (debugMode) {
+          wordObj.debug.raw = wordStrArr[wordLetterOrFontArrIndex[i]];
+        }
 
         wordObj.style.font = fontFamilyArr[i];
 

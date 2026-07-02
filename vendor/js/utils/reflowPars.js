@@ -94,9 +94,30 @@ export function assignParagraphs(page, angle) {
     let endsEarlyInt = false;
     let startsLate = false;
 
-    // Bullet points violate some heuristics, so we need to track them separately.
-    // For a bullet point list, the first line *after* the line containing the bullet point appears to be indented.
-    const bullet = /^([•◦▪▫●○◼◻➢«»]|((i+|\d+|[a-z])(\.|\)))$)/.test(line.words[0].text);
+    if (h > 0 && line.orientation !== page.lines[h - 1].orientation) {
+      newPar = true;
+      reason = 'orientation change';
+    }
+
+    // `bullet` is the lenient signal (used to suppress `indented` on the next line).
+    // `isRealListItem` is the stricter signal that actually triggers a new paragraph.
+    let bullet = /^([•◦▪▫●○◼◻➢«»]|((i+|\d+|[a-z])(\.|\)))$)/.test(line.words[0].text);
+    // `v.` is a case-name connector, never a list marker.
+    if (bullet && line.words[0].text === 'v.') bullet = false;
+    let isRealListItem = bullet;
+    if (isRealListItem && h > 0) {
+      const prevLine = page.lines[h - 1];
+      const prevLineLast = prevLine.words[prevLine.words.length - 1].text;
+      if (!/[.!?:]$/.test(prevLineLast)) isRealListItem = false;
+      else {
+        // The `.` at end of prev line may be an abbreviation inside a citation
+        // whose paren is still open (`…(MD Tenn.` → `1959) (per curiam)`).
+        const prevText = prevLine.words.map((w) => w.text).join('');
+        const lastOpen = prevText.lastIndexOf('(');
+        const lastClose = prevText.lastIndexOf(')');
+        if (lastOpen > lastClose) isRealListItem = false;
+      }
+    }
     // This will not work with non-English alphabets.  Should be replaced with a more general solution at some point.
     const lowerStart = /[a-z]/.test(line.words[0].text.slice(0, 1));
     const letterEnd = /\w/.test(line.words[line.words.length - 1].text.slice(-1));
@@ -104,6 +125,17 @@ export function assignParagraphs(page, angle) {
     // they are likely part of the same paragraph.
     // This heuristic can override some but not all other heuristics that would otherwise split the paragraph.
     const lowerConnection = lowerStart && letterEndPrev;
+
+    if (isRealListItem && h > 0) {
+      newPar = true;
+      reason = 'bullet/list item';
+    }
+
+    const firstWordSup = line.words[0].style && line.words[0].style.sup;
+    if (firstWordSup && h > 0) {
+      newPar = true;
+      reason = 'superscript/footnote';
+    }
 
     let parLineIndices = /** @type {?Array<number>} */[];
     if (parArr[parArr.length - 1] && parArr[parArr.length - 1].lines.length > 0) {
@@ -137,14 +169,51 @@ export function assignParagraphs(page, angle) {
 
       // Note: `+1` is used to indicate some non-infinitesimal difference, as sometimes infinitesimal differences exist, which are effectively 0.
 
-      // Line flagged as indented if both:
-      // (1) line to start to the right of the median line (by 2.5% of the median width) and
-      // (2) line to start to the right of the previous line and the next line.
-      const indented = lineLeftMedian && (h + 1) < page.lines.length && lineLeftArr[h] > (lineLeftMedian + lineWidthMedian * 0.025)
-        && lineLeftArr[h] > (lineLeftArr[h - 1] + 1) && lineLeftArr[h] > lineLeftArr[h + 1];
+      // Indented = starts right of median AND next line is less indented.
+      // Deliberately not compared to prev line: a body opener after a heading
+      // ("Opinion of the Court" → "Justice X delivered…") sits at the indent
+      // column without being right of the heading's left edge.
+      // Suppress on hanging-indent continuation (same left as prev, prev par's
+      // first line is less indented) — that's wrap text, not a new paragraph.
+      const parInProgress = parArr[parArr.length - 1];
+      const parFirstLineLeft = parLineIndices && parLineIndices.length > 0
+        ? lineLeftArr[parLineIndices[0]] : null;
+      const continuesPrevIndent = parInProgress
+        && parInProgress.lines.length >= 2
+        && lineLeftArr[h - 1] !== undefined
+        && Math.abs(lineLeftArr[h] - lineLeftArr[h - 1]) < (lineWidthMedian * 0.025)
+        && parFirstLineLeft !== null
+        && parFirstLineLeft < lineLeftArr[h] - (lineWidthMedian * 0.025);
+      // Catches the case `continuesPrevIndent` misses: a par whose own first
+      // line is already at the indent column wrapping to a second line at the
+      // same indent (CV entries, definitions).
+      const continuesAtSameIndent = parInProgress
+        && parInProgress.lines.length >= 1
+        && parInProgress.lines[parInProgress.lines.length - 1] === page.lines[h - 1]
+        && lineLeftArr[h - 1] !== undefined
+        && Math.abs(lineLeftArr[h] - lineLeftArr[h - 1]) < (lineWidthMedian * 0.025);
+      const indented = lineLeftMedian && (h + 1) < page.lines.length
+        && lineLeftArr[h] > (lineLeftMedian + lineWidthMedian * 0.025)
+        && lineLeftArr[h] > lineLeftArr[h + 1]
+        && !continuesPrevIndent
+        && !continuesAtSameIndent;
 
-      // All previous lines in paragraph have the same center point.
       const centerAlignedPrev = parLineIndices && parLineIndices.map((x) => lineCenterArr[x]).every((x) => Math.abs(x - lineCenterArr[h - 1]) < (lineWidthMedian * 0.0125));
+
+      // Fully-justified text trivially shares a center too. Require width variance
+      // as evidence of real centering vs. shared-edge alignment.
+      let trulyCenterAlignedPrev = false;
+      if (centerAlignedPrev && parLineIndices) {
+        if (parLineIndices.length > 1) {
+          trulyCenterAlignedPrev = parLineIndices.map((x) => lineWidthArr[x])
+            .some((x) => Math.abs(x - lineWidthArr[h - 1]) > (lineWidthMedian * 0.05));
+        } else if (parLineIndices.length === 1) {
+          const prevIdx = parLineIndices[0];
+          const sharedCenter = Math.abs(lineCenterArr[prevIdx] - lineCenterArr[h]) < (lineWidthMedian * 0.0125);
+          const widthDiffers = Math.abs(lineWidthArr[prevIdx] - lineWidthArr[h]) > (lineWidthMedian * 0.05);
+          trulyCenterAlignedPrev = sharedCenter && widthDiffers;
+        }
+      }
 
       // Line `h` and `h-1` have the same center point.
       const centerAligned = lineCenterArr[h - 1] && Math.abs(lineCenterArr[h - 1] - lineCenterArr[h]) < (lineWidthMedian * 0.0125);
@@ -210,7 +279,7 @@ export function assignParagraphs(page, angle) {
         reason = 'prev line starts late';
 
         // Add a line break if this line is indented
-      } else if (indented && !bulletPrev && !lowerConnection && !centerAlignedPrev) {
+      } else if (indented && !bulletPrev && !lowerConnection && !trulyCenterAlignedPrev) {
         newPar = true;
         reason = 'indentation';
 

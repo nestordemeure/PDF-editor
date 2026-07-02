@@ -12,7 +12,7 @@
   "dependencies": {
     "@jsquash/jpeg": "^1.6.0",
     "pako": "^3.0.0",
-    "scribe.js-ocr": "^0.9.3",
+    "scribe.js-ocr": "^0.13.0",
     "ts-ccitt-g4-encoder": "^1.0.0"
   }
 }
