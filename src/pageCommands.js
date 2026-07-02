@@ -124,6 +124,7 @@ export async function splitSelection({ pages, setProgress, setStatus, yieldToUi 
         operations: [...cloneOperations(page.operations), createSplitOp("left")],
         thumbnail: page.thumbnail ? cropCanvasHalf(page.thumbnail, "left") : null,
         selected: false,
+        isClassic: page.isClassic,
       };
 
       const rightPage = {
@@ -134,6 +135,7 @@ export async function splitSelection({ pages, setProgress, setStatus, yieldToUi 
         operations: [...cloneOperations(page.operations), createSplitOp("right")],
         thumbnail: page.thumbnail ? cropCanvasHalf(page.thumbnail, "right") : null,
         selected: false,
+        isClassic: page.isClassic,
       };
 
       nextPages.push(leftPage);

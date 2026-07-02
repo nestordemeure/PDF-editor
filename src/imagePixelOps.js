@@ -348,7 +348,7 @@ export async function encodeProcessedImage(imageData, { colorMode, compression, 
  * better entropy coding than the canvas encoder. Falls back to the canvas
  * encoder if the WASM module is unavailable.
  */
-async function encodeJpegBytes(imageData, quality01, grayscale) {
+export async function encodeJpegBytes(imageData, quality01, grayscale) {
   try {
     const buffer = await encodeMozJpeg(imageData, {
       quality: Math.round(quality01 * 100),

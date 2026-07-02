@@ -10,7 +10,7 @@
 
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284/build/pdf.min.mjs";
 import { createPage, cloneOperations, getEffectiveColorMode } from "./pageModel.js";
-import { getBasePageCanvas, updatePageThumbnail, applyOperationsToCanvas, clearBaseThumbnailCache } from "./pageRenderer.js";
+import { getBasePageCanvas, updatePageThumbnail, applyOperationsToCanvas, clearBaseThumbnailCache, detectClassicPage } from "./pageRenderer.js";
 import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection, forEachConcurrent, THUMBNAIL_CONCURRENCY } from "./pageCommands.js";
 import { savePdf } from "./saveManager.js";
 
@@ -194,6 +194,7 @@ function createStateSnapshot() {
       operations: cloneOperations(page.operations),
       selected: page.selected,
       thumbnail: page.thumbnail,
+      isClassic: page.isClassic,
     })),
   };
 }
@@ -240,6 +241,7 @@ async function restoreStateFromSnapshot(snapshot) {
       operations: cloneOperations(snap.operations),
       selected: snap.selected,
       thumbnail: snap.thumbnail || (reusable ? oldPage.thumbnail : null),
+      isClassic: snap.isClassic,
     };
   });
 
@@ -323,6 +325,12 @@ function createCardEntry(pageId) {
   const label = document.createElement("span");
   label.className = "page-tag";
 
+  const badge = document.createElement("span");
+  badge.className = "page-tag page-tag-classic";
+  badge.textContent = "text";
+  badge.title = "Typeset page: saved as-is (text and quality preserved) unless edited beyond rotation";
+  badge.hidden = true;
+
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
   // Look pages up by id at event time: page objects are replaced by undo/redo
@@ -334,6 +342,7 @@ function createCardEntry(pageId) {
   });
 
   meta.appendChild(label);
+  meta.appendChild(badge);
   meta.appendChild(checkbox);
   card.appendChild(canvas);
   card.appendChild(meta);
@@ -348,7 +357,7 @@ function createCardEntry(pageId) {
     setPreview(page);
   });
 
-  return { card, canvas, checkbox, label, thumbRef: undefined };
+  return { card, canvas, checkbox, label, badge, thumbRef: undefined };
 }
 
 function drawCardThumbnail(entry, page) {
@@ -375,6 +384,7 @@ function renderPages() {
     seen.add(page.id);
 
     entry.label.textContent = `#${index + 1}`;
+    entry.badge.hidden = !page.isClassic;
     entry.checkbox.checked = page.selected;
     if (entry.thumbRef !== page.thumbnail) {
       drawCardThumbnail(entry, page);
@@ -482,10 +492,14 @@ async function handleFiles(files) {
       const sourceId = createSourceId();
       const baseName = getFileStem(file.name) || "file";
 
-      sourcePdfs.set(sourceId, { bytes, pdfDoc, name: baseName });
+      // getPermissions() is null for unencrypted files; pdf-lib cannot decrypt,
+      // so pages from encrypted sources always go through the raster pipeline
+      const encrypted = (await pdfDoc.getPermissions()) !== null;
+
+      sourcePdfs.set(sourceId, { bytes, pdfDoc, name: baseName, encrypted });
       if (baseName) sourceFileNames.add(baseName);
 
-      sources.push({ sourceId, pdfDoc, numPages: pdfDoc.numPages, name: baseName });
+      sources.push({ sourceId, pdfDoc, numPages: pdfDoc.numPages, name: baseName, encrypted });
     }
 
     // Create page objects with thumbnails (a few PDF.js renders in flight)
@@ -497,6 +511,7 @@ async function handleFiles(files) {
     let loadedPages = 0;
     const throttledYield = makeThrottledYield();
 
+    let classicInEncrypted = 0;
     await forEachConcurrent(pageSpecs, THUMBNAIL_CONCURRENCY, async ({ source, pageIndex }, specIndex) => {
       const { canvas: thumbnail, pageSizePts } = await getBasePageCanvas({
         pdfDoc: source.pdfDoc,
@@ -504,17 +519,32 @@ async function handleFiles(files) {
         pageIndex,
       });
 
+      // Encrypted sources can't be passed through (pdf-lib cannot decrypt),
+      // so their text pages are treated like scans; the alert below explains.
+      let isClassic = await detectClassicPage(source.pdfDoc, pageIndex);
+      if (isClassic && source.encrypted) {
+        classicInEncrypted += 1;
+        isClassic = false;
+      }
+
       const page = createPage({
         sourceId: source.sourceId,
         sourcePageIndex: pageIndex,
         pageSizePts,
         thumbnail: null,
+        isClassic,
       });
 
-      // Apply default grayscale mode to the already-rendered canvas
-      // (avoids rendering every page twice on load)
-      page.operations.push({ type: "colorMode", mode: "gray" });
-      page.thumbnail = applyOperationsToCanvas(thumbnail, page.operations);
+      if (isClassic) {
+        // Text pages keep their original colors and pass through at save time
+        // (text, fonts and vectors preserved) as long as they stay unedited
+        page.thumbnail = thumbnail;
+      } else {
+        // Apply default grayscale mode to the already-rendered canvas
+        // (avoids rendering every page twice on load)
+        page.operations.push({ type: "colorMode", mode: "gray" });
+        page.thumbnail = applyOperationsToCanvas(thumbnail, page.operations);
+      }
 
       newPages[specIndex] = page;
       loadedPages += 1;
@@ -525,6 +555,13 @@ async function handleFiles(files) {
 
     pages = pages.concat(newPages);
     if (history.length === 0) pushHistory();
+
+    if (classicInEncrypted > 0) {
+      alert(
+        `This PDF is encrypted, which prevents keeping its text as real text: ` +
+        `${classicInEncrypted} text page${classicInEncrypted === 1 ? "" : "s"} will be rasterized (converted to images) on save.`
+      );
+    }
 
     setStatus(`Loaded ${totalPages} page${totalPages === 1 ? "" : "s"} (${pages.length} total).`);
     endProgress();

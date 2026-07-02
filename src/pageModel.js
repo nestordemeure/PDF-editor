@@ -23,9 +23,11 @@ export function generatePageId() {
  * @param {number} params.sourcePageIndex - Index in the source PDF (0-based)
  * @param {Object} params.pageSizePts - Page size in points { width, height }
  * @param {HTMLCanvasElement} params.thumbnail - Low-res thumbnail canvas
+ * @param {boolean} [params.isClassic] - Page has a real text layer (typeset or
+ *   already-OCR'd); such pages are passed through at save time when unedited
  * @returns {Object} Page object
  */
-export function createPage({ sourceId, sourcePageIndex, pageSizePts, thumbnail }) {
+export function createPage({ sourceId, sourcePageIndex, pageSizePts, thumbnail, isClassic = false }) {
   return {
     id: generatePageId(),
     sourceId,
@@ -34,6 +36,7 @@ export function createPage({ sourceId, sourcePageIndex, pageSizePts, thumbnail }
     operations: [],
     thumbnail,
     selected: false,
+    isClassic,
   };
 }
 

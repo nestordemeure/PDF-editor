@@ -47,6 +47,53 @@ export async function getBasePageCanvas({ pdfDoc, sourceId, pageIndex, maxWidth 
 }
 
 /**
+ * True when the page is "classic" (typeset text, worth preserving as-is).
+ *
+ * Pages without extractable text are scans. Pages *with* text can still be
+ * scans: OCR tools add an invisible text layer over the page image. Those
+ * are detected by measuring how much of the page area is covered by painted
+ * images — a page that is essentially one full-page image is a scan and
+ * should go through the raster pipeline (compression, cleanup, re-OCR).
+ */
+export async function detectClassicPage(pdfDoc, pageIndex) {
+  const page = await pdfDoc.getPage(pageIndex + 1);
+  const textContent = await page.getTextContent();
+  const hasText = textContent.items.some(item => item.str && item.str.trim().length > 0);
+  if (!hasText) return false;
+
+  // Sum the page-area fraction painted with images. Images are drawn as a
+  // unit square through the CTM, so each one's area is |det(CTM)|; the
+  // determinant composes multiplicatively, which lets us track a single
+  // scalar through save/restore/transform instead of full matrices.
+  const OPS = window.pdfjsLib.OPS;
+  const opList = await page.getOperatorList();
+  const [x1, y1, x2, y2] = page.view;
+  const pageArea = Math.abs((x2 - x1) * (y2 - y1));
+
+  let det = 1;
+  const stack = [];
+  let imageArea = 0;
+  for (let i = 0; i < opList.fnArray.length; i++) {
+    const fn = opList.fnArray[i];
+    if (fn === OPS.save) {
+      stack.push(det);
+    } else if (fn === OPS.restore) {
+      if (stack.length) det = stack.pop();
+    } else if (fn === OPS.transform) {
+      const [a, b, c, d] = opList.argsArray[i];
+      det *= a * d - b * c;
+    } else if (
+      fn === OPS.paintImageXObject ||
+      fn === OPS.paintInlineImageXObject ||
+      fn === OPS.paintImageMaskXObject
+    ) {
+      imageArea += Math.abs(det);
+    }
+  }
+  return imageArea < 0.9 * pageArea;
+}
+
+/**
  * Renders a PDF page to a canvas sized to fit maxWidth
  * @returns {Promise<{canvas: HTMLCanvasElement, pageSizePts: {width: number, height: number}}>}
  */

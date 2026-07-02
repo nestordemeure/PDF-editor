@@ -104,6 +104,11 @@ body {
   font-size: 11px;
 }
 
+.page-tag-classic {
+  background: #e8f0fe;
+  color: #2559a7;
+}
+
 .preview-canvas {
   width: 100%;
   height: auto;

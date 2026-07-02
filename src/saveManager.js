@@ -14,6 +14,7 @@ import { applyGeometricOpsToCanvas } from "./pageRenderer.js";
 import { applyPixelPipeline, encodeProcessedImage } from "./imagePixelOps.js";
 import { getEffectiveColorMode } from "./pageModel.js";
 import { forEachConcurrent } from "./pageCommands.js";
+import { loadPreservableLibDocs, canPreservePage, copyPreservedPages, recompressPreservedImages } from "./classicPdf.js";
 
 // Pages rendered concurrently during save (overlaps PDF.js decoding with
 // main-thread rasterization and worker dispatch)
@@ -324,7 +325,16 @@ async function runOcr({ renderedPages, lang, onProgress, onStatus, scribeModule 
 }
 
 /**
- * Main save function
+ * Main save function.
+ *
+ * Pages split into two groups:
+ * - Preserved: "classic" pages (real text layer) from unencrypted sources
+ *   whose only operations are rotations. These are copied verbatim with
+ *   pdf-lib (text/fonts/vectors kept), rotated via /Rotate, and their
+ *   embedded images recompressed in place when that shrinks them.
+ * - Rasterized: everything else goes through the render + pixel pipeline +
+ *   OCR path exactly as before. A document of pure scans takes this path
+ *   for every page, unchanged.
  */
 export async function savePdf({ pdfSources, pages, options, onProgress, onStatus }) {
   const { compression, ocrLang, scribeModule, PDFDocument } = options;
@@ -348,24 +358,35 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
   };
 
   const jpegQuality = compression === "low" ? 0.75 : compression === "medium" ? 0.60 : compression === "high" ? 0.50 : 0.85;
-  const wantOcr = Boolean(ocrLang && ocrLang !== "none" && scribeModule);
 
-  // Phase 1: Render all pages
-  if (onStatus) onStatus("Rendering pages...");
-  const renderedPages = await renderAllPages({
-    pages,
-    getPdfDocForPage,
-    jpegQuality,
-    compression,
-    needOcrImage: wantOcr,
-    onProgress,
-    onStatus,
-  });
+  // Phase 0: decide which pages can be preserved (copied, not rasterized)
+  const libDocs = await loadPreservableLibDocs({ pdfSources, pages, PDFDocument });
+  const preserved = pages.map(page => canPreservePage(page, libDocs));
+  const rasterPages = pages.filter((page, i) => !preserved[i]);
+
+  // Preserved pages already have real text, so OCR only concerns raster pages
+  const wantOcr = Boolean(ocrLang && ocrLang !== "none" && scribeModule && rasterPages.length > 0);
+
+  // Phase 1: Render the rasterized pages
+  let renderedPages = [];
+  if (rasterPages.length > 0) {
+    if (onStatus) onStatus("Rendering pages...");
+    renderedPages = await renderAllPages({
+      pages: rasterPages,
+      getPdfDocForPage,
+      jpegQuality,
+      compression,
+      needOcrImage: wantOcr,
+      onProgress,
+      onStatus,
+    });
+  }
 
   let ocrUsed = false;
-  let finalPdfBytes;
+  let finalDoc = null;
 
-  // Phase 2: OCR (if enabled)
+  // Phase 2: OCR (if enabled). The scribe PDF holds the raster pages in
+  // their relative order; preserved pages are inserted afterwards.
   if (wantOcr) {
     if (onStatus) onStatus("Running OCR...");
 
@@ -411,23 +432,43 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
         await yieldToUi();
       }
 
-      if (onStatus) onStatus("Finalizing PDF...");
-      finalPdfBytes = await ocrPdfDoc.save({ useObjectStreams: true });
+      // Insert preserved pages at their final positions (ascending order
+      // keeps earlier insertions and raster page order intact)
+      if (preserved.some(Boolean)) {
+        if (onStatus) onStatus("Copying original pages...");
+        const copied = await copyPreservedPages({ targetDoc: ocrPdfDoc, pages, preserved, libDocs });
+        for (const finalIndex of [...copied.keys()].sort((a, b) => a - b)) {
+          ocrPdfDoc.insertPage(finalIndex, copied.get(finalIndex));
+        }
+        await recompressCopiedImages({ pdfDoc: ocrPdfDoc, copied, compression, jpegQuality, onStatus });
+      }
+
+      finalDoc = ocrPdfDoc;
     } else {
       if (onStatus) onStatus("OCR failed, saving without OCR...");
     }
   }
 
   // Phase 3: Create PDF without OCR if needed
-  if (!finalPdfBytes) {
+  if (!finalDoc) {
     if (onStatus) onStatus("Creating PDF...");
     const outputPdf = await PDFDocument.create();
+    const copied = preserved.some(Boolean)
+      ? await copyPreservedPages({ targetDoc: outputPdf, pages, preserved, libDocs })
+      : new Map();
 
-    for (let i = 0; i < renderedPages.length; i++) {
-      if (onProgress) onProgress(i + 1, renderedPages.length);
-      if (onStatus) onStatus(`Adding page ${i + 1}/${renderedPages.length}`);
+    let rasterDone = 0;
+    for (let i = 0; i < pages.length; i++) {
+      if (onProgress) onProgress(i + 1, pages.length);
+      if (onStatus) onStatus(`Adding page ${i + 1}/${pages.length}`);
 
-      const rendered = renderedPages[i];
+      if (preserved[i]) {
+        outputPdf.addPage(copied.get(i));
+        continue;
+      }
+
+      const rendered = renderedPages[rasterDone];
+      rasterDone += 1;
       const pdfPage = outputPdf.addPage([rendered.pageSizePts.width, rendered.pageSizePts.height]);
       await drawRenderedImage(outputPdf, pdfPage, rendered, {
         x: 0,
@@ -439,9 +480,27 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
       await yieldToUi();
     }
 
-    if (onStatus) onStatus("Finalizing PDF...");
-    finalPdfBytes = await outputPdf.save({ useObjectStreams: true });
+    await recompressCopiedImages({ pdfDoc: outputPdf, copied, compression, jpegQuality, onStatus });
+    finalDoc = outputPdf;
   }
 
+  if (onStatus) onStatus("Finalizing PDF...");
+  const finalPdfBytes = await finalDoc.save({ useObjectStreams: true });
   return { pdfBytes: finalPdfBytes, ocrUsed };
+}
+
+/**
+ * Recompresses the embedded images of copied (preserved) pages, unless the
+ * user asked for lossless output
+ */
+async function recompressCopiedImages({ pdfDoc, copied, compression, jpegQuality, onStatus }) {
+  if (copied.size === 0 || compression === "none") return;
+  const replaced = await recompressPreservedImages({
+    pdfDoc,
+    pdfPages: copied.values(),
+    jpegQuality,
+    onStatus,
+    yieldToUi,
+  });
+  if (replaced > 0 && onStatus) onStatus(`Recompressed ${replaced} embedded image${replaced === 1 ? "" : "s"}.`);
 }
