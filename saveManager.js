@@ -4,11 +4,10 @@
  * Pages are rendered at the target DPI, run through the shared operation
  * pipeline (same one used for thumbnails), then embedded as compactly as
  * possible:
- * - B&W pages: raw 1-bit DeviceGray + FlateDecode (packed bits, ~24x smaller
- *   than letting pdf-lib re-expand a PNG to 24-bit RGB).
+ * - B&W pages: CCITT G4 (fallback: raw 1-bit DeviceGray + FlateDecode).
  * - Grayscale, "No Compression": raw 8-bit DeviceGray + FlateDecode (lossless).
  * - Color, "No Compression": lossless PNG.
- * - Everything else: JPEG at a quality matching the compression level.
+ * - Everything else: JPEG (MozJPEG) at a quality matching the compression level.
  */
 
 import { applyGeometricOpsToCanvas } from "./thumbnailRenderer.js";
@@ -435,7 +434,7 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
       }
 
       if (onStatus) onStatus("Finalizing PDF...");
-      finalPdfBytes = await ocrPdfDoc.save({ useObjectStreams: false });
+      finalPdfBytes = await ocrPdfDoc.save({ useObjectStreams: true });
     } else {
       if (onStatus) onStatus("OCR failed, saving without OCR...");
     }
@@ -463,7 +462,7 @@ export async function savePdf({ pdfSources, pages, options, onProgress, onStatus
     }
 
     if (onStatus) onStatus("Finalizing PDF...");
-    finalPdfBytes = await outputPdf.save({ useObjectStreams: false });
+    finalPdfBytes = await outputPdf.save({ useObjectStreams: true });
   }
 
   return { pdfBytes: finalPdfBytes, ocrUsed };

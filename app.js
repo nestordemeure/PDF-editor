@@ -10,7 +10,7 @@
 
 import { createPage, cloneOperations, getEffectiveColorMode } from "./pageModel.js";
 import { renderPdfPageThumbnail, updatePageThumbnail, applyOperationsToCanvas } from "./thumbnailRenderer.js";
-import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection } from "./tools.js";
+import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection, forEachConcurrent, THUMBNAIL_CONCURRENCY } from "./tools.js";
 import { savePdf } from "./saveManager.js";
 
 // DOM Elements
@@ -58,6 +58,20 @@ const sourceFileNames = new Set();
 // ============================================
 // Utility Functions
 // ============================================
+
+/**
+ * Returns a yield function that only actually yields every `intervalMs`,
+ * so tight per-page loops don't pay a frame (16ms) per iteration.
+ */
+function makeThrottledYield(intervalMs = 40) {
+  let last = performance.now();
+  return async () => {
+    if (performance.now() - last >= intervalMs) {
+      await yieldToUi();
+      last = performance.now();
+    }
+  };
+}
 
 function yieldToUi() {
   if (document.hidden) {
@@ -165,7 +179,9 @@ function updatePageCount() {
 
 /**
  * Creates a lightweight snapshot of the current state.
- * Only stores page metadata and operation lists, not pixel data.
+ * Thumbnail canvases are stored by reference — safe because thumbnails are
+ * always replaced, never mutated in place, after their initial creation.
+ * pushHistory strips them from older snapshots to bound memory.
  */
 function createStateSnapshot() {
   return {
@@ -176,6 +192,7 @@ function createStateSnapshot() {
       pageSizePts: { ...page.pageSizePts },
       operations: cloneOperations(page.operations),
       selected: page.selected,
+      thumbnail: page.thumbnail,
     })),
   };
 }
@@ -204,15 +221,16 @@ async function restoreStateFromSnapshot(snapshot) {
   // Map old pages by ID for thumbnail reuse
   const oldPagesById = new Map(pages.map(p => [p.id, p]));
 
-  // Restore pages
+  // Restore pages, preferring the snapshot's own thumbnail, then the current
+  // page's thumbnail when the operations still match
   pages = snapshot.pages.map(snap => {
     const oldPage = oldPagesById.get(snap.id);
-    const needsThumbnail =
-      !oldPage ||
-      !oldPage.thumbnail ||
-      oldPage.sourceId !== snap.sourceId ||
-      oldPage.sourcePageIndex !== snap.sourcePageIndex ||
-      !operationsEqual(oldPage.operations, snap.operations);
+    const reusable =
+      oldPage &&
+      oldPage.thumbnail &&
+      oldPage.sourceId === snap.sourceId &&
+      oldPage.sourcePageIndex === snap.sourcePageIndex &&
+      operationsEqual(oldPage.operations, snap.operations);
     return {
       id: snap.id,
       sourceId: snap.sourceId,
@@ -220,7 +238,7 @@ async function restoreStateFromSnapshot(snapshot) {
       pageSizePts: { ...snap.pageSizePts },
       operations: cloneOperations(snap.operations),
       selected: snap.selected,
-      thumbnail: needsThumbnail ? null : oldPage.thumbnail, // Reuse only if still valid
+      thumbnail: snap.thumbnail || (reusable ? oldPage.thumbnail : null),
     };
   });
 
@@ -228,14 +246,25 @@ async function restoreStateFromSnapshot(snapshot) {
   const pagesNeedingThumbnails = pages.filter(p => !p.thumbnail);
   if (pagesNeedingThumbnails.length > 0 && sourcePdfs.size > 0) {
     setStatus("Regenerating thumbnails...");
-    for (let i = 0; i < pagesNeedingThumbnails.length; i++) {
-      const page = pagesNeedingThumbnails[i];
+    let done = 0;
+    await forEachConcurrent(pagesNeedingThumbnails, THUMBNAIL_CONCURRENCY, async page => {
       const pdfDoc = getPdfDocForPage(page);
-      if (!pdfDoc) continue;
+      if (!pdfDoc) return;
       await updatePageThumbnail({ pdfDoc, page });
-      setProgress(i + 1, pagesNeedingThumbnails.length);
-    }
+      done += 1;
+      setProgress(done, pagesNeedingThumbnails.length);
+    });
     endProgress();
+  }
+}
+
+// How many recent snapshots keep thumbnail references (instant undo);
+// older ones regenerate thumbnails on restore to bound memory.
+const SNAPSHOTS_WITH_THUMBNAILS = 2;
+
+function stripSnapshotThumbnails(snapshot) {
+  for (const page of snapshot.pages) {
+    page.thumbnail = null;
   }
 }
 
@@ -244,6 +273,9 @@ function pushHistory() {
   history.push(snapshot);
   if (history.length > 50) {
     history.shift();
+  }
+  for (let i = 0; i < history.length - SNAPSHOTS_WITH_THUMBNAILS; i++) {
+    stripSnapshotThumbnails(history[i]);
   }
   future = [];
 }
@@ -268,82 +300,122 @@ function syncSelectAll() {
 // Rendering
 // ============================================
 
+// Card DOM cache: pageId -> { card, canvas, checkbox, label, thumbRef }
+// Cards are reused across renders; only changed parts are updated.
+const cardCache = new Map();
+
+function getPageById(id) {
+  return pages.find(page => page.id === id) || null;
+}
+
+function createCardEntry(pageId) {
+  const card = document.createElement("div");
+  card.className = "page-card";
+  card.dataset.pageId = pageId;
+
+  const canvas = document.createElement("canvas");
+  canvas.className = "page-canvas";
+
+  const meta = document.createElement("div");
+  meta.className = "page-meta";
+
+  const label = document.createElement("span");
+  label.className = "page-tag";
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  // Look pages up by id at event time: page objects are replaced by undo/redo
+  checkbox.addEventListener("change", () => {
+    const page = getPageById(pageId);
+    if (!page) return;
+    page.selected = checkbox.checked;
+    syncSelectAll();
+  });
+
+  meta.appendChild(label);
+  meta.appendChild(checkbox);
+  card.appendChild(canvas);
+  card.appendChild(meta);
+
+  card.addEventListener("click", event => {
+    if (event.target.tagName.toLowerCase() === "input") return;
+    const page = getPageById(pageId);
+    if (!page) return;
+    page.selected = !page.selected;
+    checkbox.checked = page.selected;
+    syncSelectAll();
+    setPreview(page);
+  });
+
+  return { card, canvas, checkbox, label, thumbRef: undefined };
+}
+
+function drawCardThumbnail(entry, page) {
+  if (page.thumbnail) {
+    entry.canvas.width = page.thumbnail.width;
+    entry.canvas.height = page.thumbnail.height;
+    entry.canvas.getContext("2d").drawImage(page.thumbnail, 0, 0);
+  } else {
+    entry.canvas.width = 100;
+    entry.canvas.height = 140;
+  }
+  entry.thumbRef = page.thumbnail;
+}
+
 function renderPages() {
-  pageGrid.innerHTML = "";
+  const seen = new Set();
 
   pages.forEach((page, index) => {
-    const card = document.createElement("div");
-    card.className = "page-card";
-    card.dataset.pageId = page.id;
+    let entry = cardCache.get(page.id);
+    if (!entry) {
+      entry = createCardEntry(page.id);
+      cardCache.set(page.id, entry);
+    }
+    seen.add(page.id);
 
-    // Create canvas from thumbnail
-    const canvas = document.createElement("canvas");
-    canvas.className = "page-canvas";
-    if (page.thumbnail) {
-      canvas.width = page.thumbnail.width;
-      canvas.height = page.thumbnail.height;
-      canvas.getContext("2d").drawImage(page.thumbnail, 0, 0);
-    } else {
-      canvas.width = 100;
-      canvas.height = 140;
+    entry.label.textContent = `#${index + 1}`;
+    entry.checkbox.checked = page.selected;
+    if (entry.thumbRef !== page.thumbnail) {
+      drawCardThumbnail(entry, page);
     }
 
-    const meta = document.createElement("div");
-    meta.className = "page-meta";
-
-    const label = document.createElement("span");
-    label.className = "page-tag";
-    label.textContent = `#${index + 1}`;
-
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = page.selected;
-    checkbox.addEventListener("change", () => {
-      page.selected = checkbox.checked;
-      syncSelectAll();
-    });
-
-    meta.appendChild(label);
-    meta.appendChild(checkbox);
-
-    card.appendChild(canvas);
-    card.appendChild(meta);
-
-    card.addEventListener("click", event => {
-      if (event.target.tagName.toLowerCase() === "input") return;
-      page.selected = !page.selected;
-      checkbox.checked = page.selected;
-      syncSelectAll();
-      setPreview(page);
-    });
-
-    pageGrid.appendChild(card);
+    // Move into position only if not already there
+    const currentChild = pageGrid.children[index];
+    if (currentChild !== entry.card) {
+      pageGrid.insertBefore(entry.card, currentChild || null);
+    }
   });
+
+  // Drop cards for removed pages
+  for (const [id, entry] of cardCache) {
+    if (!seen.has(id)) {
+      entry.card.remove();
+      cardCache.delete(id);
+    }
+  }
+  while (pageGrid.children.length > pages.length) {
+    pageGrid.lastChild.remove();
+  }
 
   updatePageCount();
   syncSelectAll();
-  setupSortable();
   updatePreviewAfterRender();
 }
 
-function setupSortable() {
-  if (sortable) {
-    sortable.destroy();
-  }
-  sortable = new Sortable(pageGrid, {
-    animation: 150,
-    onStart: evt => {
-      evt.item.classList.add("dragging");
-    },
-    onEnd: evt => {
-      evt.item.classList.remove("dragging");
-      pushHistory();
-      const order = Array.from(pageGrid.children).map(child => child.dataset.pageId);
-      pages.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
-      renderPages();
-    },
-  });
-}
+// Sortable is set up once; it tolerates cards being added/removed
+sortable = new Sortable(pageGrid, {
+  animation: 150,
+  onStart: evt => {
+    evt.item.classList.add("dragging");
+  },
+  onEnd: evt => {
+    evt.item.classList.remove("dragging");
+    pushHistory();
+    const order = new Map(Array.from(pageGrid.children).map((child, i) => [child.dataset.pageId, i]));
+    pages.sort((a, b) => order.get(a.id) - order.get(b.id));
+    renderPages();
+  },
+});
 
 function setPreview(page) {
   activePreviewId = page.id;
@@ -416,38 +488,39 @@ async function handleFiles(files) {
       sources.push({ sourceId, pdfDoc, numPages: pdfDoc.numPages, name: baseName });
     }
 
-    // Create page objects with thumbnails
-    const newPages = [];
+    // Create page objects with thumbnails (a few PDF.js renders in flight)
     const totalPages = sources.reduce((sum, source) => sum + source.numPages, 0);
+    const pageSpecs = sources.flatMap(source =>
+      Array.from({ length: source.numPages }, (_, i) => ({ source, pageIndex: i }))
+    );
+    const newPages = new Array(pageSpecs.length);
     let loadedPages = 0;
+    const throttledYield = makeThrottledYield();
 
-    for (const source of sources) {
-      for (let i = 0; i < source.numPages; i++) {
-        loadedPages += 1;
-        setStatus(`Loading ${source.name || "file"} page ${i + 1}/${source.numPages}`);
-        setProgress(loadedPages, totalPages);
+    await forEachConcurrent(pageSpecs, THUMBNAIL_CONCURRENCY, async ({ source, pageIndex }, specIndex) => {
+      const { canvas: thumbnail, pageSizePts } = await renderPdfPageThumbnail({
+        pdfDoc: source.pdfDoc,
+        pageIndex,
+      });
 
-        const { canvas: thumbnail, pageSizePts } = await renderPdfPageThumbnail({
-          pdfDoc: source.pdfDoc,
-          pageIndex: i,
-        });
+      const page = createPage({
+        sourceId: source.sourceId,
+        sourcePageIndex: pageIndex,
+        pageSizePts,
+        thumbnail: null,
+      });
 
-        const page = createPage({
-          sourceId: source.sourceId,
-          sourcePageIndex: i,
-          pageSizePts,
-          thumbnail: null,
-        });
+      // Apply default grayscale mode to the already-rendered canvas
+      // (avoids rendering every page twice on load)
+      page.operations.push({ type: "colorMode", mode: "gray" });
+      page.thumbnail = applyOperationsToCanvas(thumbnail, page.operations);
 
-        // Apply default grayscale mode to the already-rendered canvas
-        // (avoids rendering every page twice on load)
-        page.operations.push({ type: "colorMode", mode: "gray" });
-        page.thumbnail = applyOperationsToCanvas(thumbnail, page.operations);
-
-        newPages.push(page);
-        await yieldToUi();
-      }
-    }
+      newPages[specIndex] = page;
+      loadedPages += 1;
+      setStatus(`Loading ${source.name || "file"} page ${loadedPages}/${totalPages}`);
+      setProgress(loadedPages, totalPages);
+      await throttledYield();
+    });
 
     pages = newPages;
     pushHistory();
@@ -479,7 +552,7 @@ rotateBtn.addEventListener("click", async () => {
   setProgress(0, selected.length);
   setStatus(`Rotating ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await rotateSelection({ pages, setProgress, setStatus, yieldToUi });
+  await rotateSelection({ pages, setProgress, setStatus, yieldToUi: makeThrottledYield() });
 
   renderPages();
   endProgress();
@@ -495,7 +568,7 @@ colorModeSelect.addEventListener("change", async () => {
   setProgress(0, selected.length);
   setStatus(`Applying color mode to ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await applyColorModeToSelection({ pages, mode, getPdfDocForPage, setProgress, setStatus, yieldToUi });
+  await applyColorModeToSelection({ pages, mode, getPdfDocForPage, setProgress, setStatus, yieldToUi: makeThrottledYield() });
 
   renderPages();
   endProgress();
@@ -510,7 +583,7 @@ splitBtn.addEventListener("click", async () => {
   setProgress(0, pages.length);
   setStatus("Splitting pages...");
 
-  const nextPages = await splitSelection({ pages, setProgress, setStatus, yieldToUi });
+  const nextPages = await splitSelection({ pages, setProgress, setStatus, yieldToUi: makeThrottledYield() });
   pages = nextPages;
 
   renderPages();
@@ -542,7 +615,7 @@ removeShadingBtn.addEventListener("click", async () => {
   setProgress(0, selected.length);
   setStatus(`Removing shading from ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await removeShadingSelection({ pages, getPdfDocForPage, setProgress, setStatus, yieldToUi });
+  await removeShadingSelection({ pages, getPdfDocForPage, setProgress, setStatus, yieldToUi: makeThrottledYield() });
 
   renderPages();
   endProgress();
@@ -557,7 +630,7 @@ enhanceContrastBtn.addEventListener("click", async () => {
   setProgress(0, selected.length);
   setStatus(`Enhancing contrast for ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await enhanceContrastSelection({ pages, getPdfDocForPage, setProgress, setStatus, yieldToUi });
+  await enhanceContrastSelection({ pages, getPdfDocForPage, setProgress, setStatus, yieldToUi: makeThrottledYield() });
 
   renderPages();
   endProgress();
