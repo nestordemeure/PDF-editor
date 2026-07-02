@@ -9,6 +9,7 @@
 
 import { OperationType, getEffectiveColorMode } from "./pageModel.js";
 import { encode as encodeCcittG4, binarizeToBitPacked } from "./vendor/ccitt-g4-encoder.mjs";
+import encodeMozJpeg from "./vendor/jsquash-jpeg/encode.js";
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -335,6 +336,23 @@ export async function encodeProcessedImage(imageData, { colorMode, compression, 
     return { kind: "png", bytes, width, height, ocrBytes: bytes, ocrMime: "image/png" };
   }
 
-  const bytes = await imageDataToBlobBytes(imageData, "image/jpeg", jpegQuality);
+  const bytes = await encodeJpegBytes(imageData, jpegQuality, colorMode === "gray");
   return { kind: "jpeg", bytes, width, height, ocrBytes: bytes, ocrMime: "image/jpeg" };
+}
+
+/**
+ * JPEG via MozJPEG (WASM): single-channel output for grayscale pages and
+ * better entropy coding than the canvas encoder. Falls back to the canvas
+ * encoder if the WASM module is unavailable.
+ */
+async function encodeJpegBytes(imageData, quality01, grayscale) {
+  try {
+    const buffer = await encodeMozJpeg(imageData, {
+      quality: Math.round(quality01 * 100),
+      color_space: grayscale ? 1 /* grayscale */ : 3 /* YCbCr */,
+    });
+    return new Uint8Array(buffer);
+  } catch (e) {
+    return await imageDataToBlobBytes(imageData, "image/jpeg", quality01);
+  }
 }

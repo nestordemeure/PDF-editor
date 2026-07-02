@@ -26,6 +26,16 @@ cp node_modules/ts-ccitt-g4-encoder/dist/index.mjs vendor/ccitt-g4-encoder.mjs
 cp node_modules/ts-ccitt-g4-encoder/LICENSE vendor/LICENSE-ts-ccitt-g4-encoder.txt
 ```
 
+Grayscale and color pages are JPEG-compressed with MozJPEG via
+`@jsquash/jpeg` (Apache-2.0), vendored under `vendor/jsquash-jpeg/`. To update it:
+
+```bash
+npm install @jsquash/jpeg@latest
+cp node_modules/@jsquash/jpeg/{encode.js,meta.js,utils.js,LICENSE} vendor/jsquash-jpeg/
+cp node_modules/@jsquash/jpeg/codec/LICENSE.codec.md vendor/jsquash-jpeg/
+cp node_modules/@jsquash/jpeg/codec/enc/mozjpeg_enc.{js,wasm} vendor/jsquash-jpeg/codec/enc/
+```
+
 ```bash
 npm install scribe.js-ocr@latest
 cp node_modules/scribe.js-ocr/scribe.js vendor/scribe.js
