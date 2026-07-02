@@ -6,7 +6,7 @@ Open the [GitHub Pages version](https://nestordemeure.github.io/PDF-editor/), or
 
 ## What it does
 
-- Load one or more PDFs and merge them.
+- Load one or more PDFs and merge them; loading again appends to the current pages.
 - Reorder pages by dragging; select pages to edit (or select all).
 - Rotate 90°, split double pages down the middle, delete pages.
 - Clean up scans: grayscale, black & white (flat or adaptive), shadow removal, contrast enhancement.

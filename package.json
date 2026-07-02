@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Minimal, in-browser PDF cleanup tool for scanned books.",
   "private": true,
+  "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nestordemeure/PDF-editor.git"

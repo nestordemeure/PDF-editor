@@ -8,6 +8,7 @@
  * - Full rendering happens at save time
  */
 
+import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284/build/pdf.min.mjs";
 import { createPage, cloneOperations, getEffectiveColorMode } from "./pageModel.js";
 import { getBasePageCanvas, updatePageThumbnail, applyOperationsToCanvas, clearBaseThumbnailCache } from "./pageRenderer.js";
 import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection, forEachConcurrent, THUMBNAIL_CONCURRENCY } from "./pageCommands.js";
@@ -34,9 +35,9 @@ const previewCanvas = document.getElementById("previewCanvas");
 const previewLabel = document.getElementById("previewLabel");
 const ocrLang = document.getElementById("ocrLang");
 
-// PDF.js setup
-const pdfjsLib = window["pdfjs-dist/build/pdf"];
-pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+// PDF.js setup (saveManager reads window.pdfjsLib for its bytes fallback)
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284/build/pdf.worker.min.mjs";
+window.pdfjsLib = pdfjsLib;
 
 // pdf-lib
 const { PDFDocument } = window.PDFLib;
@@ -466,18 +467,12 @@ async function handleFiles(files) {
   setProgress(0, 1);
 
   try {
-    // Reset state for new load; release the previous PDF.js documents
-    // (each one holds a worker and parsed data)
-    for (const source of sourcePdfs.values()) {
-      source.pdfDoc?.destroy();
+    // Loading appends to any already-loaded pages (so books split across
+    // several PDFs can be merged); undo removes the appended pages.
+    // Select all + delete (or a refresh) starts over.
+    if (pages.length > 0) {
+      pushHistory();
     }
-    pages = [];
-    history = [];
-    future = [];
-    sourcePdfs.clear();
-    sourceFileNames.clear();
-    clearBaseThumbnailCache();
-    renderPages(); // clear the old grid while the new files load
 
     // Load all PDFs first to get counts
     const sources = [];
@@ -528,10 +523,10 @@ async function handleFiles(files) {
       await throttledYield();
     });
 
-    pages = newPages;
-    pushHistory();
+    pages = pages.concat(newPages);
+    if (history.length === 0) pushHistory();
 
-    setStatus(`Loaded ${totalPages} page${totalPages === 1 ? "" : "s"}.`);
+    setStatus(`Loaded ${totalPages} page${totalPages === 1 ? "" : "s"} (${pages.length} total).`);
     endProgress();
     renderPages();
   } catch (error) {

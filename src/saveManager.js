@@ -333,8 +333,8 @@ async function runOcr({ renderedPages, lang, onProgress, onStatus, scribeModule 
 export async function savePdf({ pdfSources, pages, options, onProgress, onStatus }) {
   const { compression, ocrLang, scribeModule, PDFDocument } = options;
 
-  // Build a sourceId -> pdfDoc lookup
-  const pdfjsLib = window["pdfjs-dist/build/pdf"];
+  // Build a sourceId -> pdfDoc lookup (window.pdfjsLib is set by app.js)
+  const pdfjsLib = window.pdfjsLib;
   const pdfDocCache = new Map();
 
   const getPdfDocForPage = async (page) => {
