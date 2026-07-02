@@ -26,4 +26,21 @@ if [[ "${PORT}" != "${REQUESTED_PORT}" ]]; then
 fi
 
 echo "Serving ${ROOT_DIR} on http://localhost:${PORT}"
-python3 -m http.server "${PORT}" --bind 127.0.0.1 --directory "${ROOT_DIR}"
+# no-cache so browsers revalidate on every load — otherwise Chrome can mix
+# stale cached modules with fresh ones after the code changes
+python3 - "${PORT}" "${ROOT_DIR}" <<'PY'
+import sys
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+
+port, root = int(sys.argv[1]), sys.argv[2]
+
+class Handler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=root, **kwargs)
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
+ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
