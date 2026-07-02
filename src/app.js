@@ -555,14 +555,6 @@ async function runExclusive(fn) {
   }
 }
 
-// Warn before losing edits on tab close
-window.addEventListener("beforeunload", event => {
-  if (pages.length > 0 || commandInProgress) {
-    event.preventDefault();
-    event.returnValue = "";
-  }
-});
-
 fileInput.addEventListener("change", event => {
   const files = Array.from(event.target.files);
   event.target.value = "";
