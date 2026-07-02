@@ -565,6 +565,27 @@ async function handleFiles(files) {
       await throttledYield();
     });
 
+    // Ask what to do with detected text pages: preserving keeps them
+    // verbatim (best for born-digital PDFs); stripping treats them as scans
+    // (cleanup + re-OCR — often better when the text comes from an old OCR).
+    for (const source of sources) {
+      const classicPages = newPages.filter(page => page.sourceId === source.sourceId && page.isClassic);
+      if (classicPages.length === 0) continue;
+      const keep = confirm(
+        `"${source.name}" contains ${classicPages.length} page${classicPages.length === 1 ? "" : "s"} with real text.\n\n` +
+        `OK — keep the text: these pages are saved as-is (text, fonts and quality preserved; embedded images still compressed).\n\n` +
+        `Cancel — strip the text: treat them as scans (cleaned, recompressed and re-OCRed; often better when the text comes from an old OCR).`
+      );
+      if (keep) continue;
+      for (const page of classicPages) {
+        page.isClassic = false;
+        page.operations.push({ type: "colorMode", mode: "gray" });
+        // Thumbnail is still the base render here (classic pages get no
+        // default operations), so the scan default can be applied directly
+        if (page.thumbnail) page.thumbnail = applyOperationsToCanvas(page.thumbnail, page.operations);
+      }
+    }
+
     pages = pages.concat(newPages);
     if (history.length === 0) pushHistory();
 
