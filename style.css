@@ -117,3 +117,8 @@ body {
   text-align: center;
   text-align-last: center;
 }
+
+/* Keep the dropdown arrow always visible, not just on hover */
+.select:not(.is-multiple):not(.is-loading)::after {
+  border-color: var(--ink);
+}
