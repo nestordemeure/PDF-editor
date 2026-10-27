@@ -40,7 +40,7 @@ Dependency direction: `gui` → `save` → `pipeline` → `pixel`/`encode`/`rend
 - **Copied**: a text page with no pixel operations. The page objects are copied. The view becomes `/CropBox` and `/Rotate`, so split and rotation keep the text.
 - **PassThrough**: a scan page with no pixel operations, at "No compression" or when re-encoding is not smaller. The original image stream is reused. A lossless repack replaces it only when strictly smaller.
 - **Reencoded**: the scan image is decoded at its own resolution, cropped, downsampled to the level's DPI, processed and encoded.
-- **Rendered**: MuPDF renders the page (300 DPI, or the scan's own resolution when the image codec is unknown), then as above.
+- **Rendered**: MuPDF renders the page at the resolution of its main image (the largest, if it covers half the page), else 300 DPI, capped at 50 Mpx; then as above. At "No compression" it uses that image's JPEG quality, so rendered scans do not grow.
 
 ## Invariants
 

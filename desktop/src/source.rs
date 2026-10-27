@@ -41,6 +41,21 @@ pub struct SourcePage {
 }
 
 impl SourcePage {
+    /// The largest image XObject on the page when it covers at least half
+    /// of it, with its placement in display space: what a rendered scan is
+    /// made of.
+    pub fn main_image(&self) -> Option<(ObjectId, Matrix)> {
+        let content = self.content.as_ref().ok()?;
+        let page_area = self.page_box.area();
+        let image = content
+            .images
+            .iter()
+            .filter(|i| i.id.is_some())
+            .max_by(|a, b| a.ctm.det().abs().total_cmp(&b.ctm.det().abs()))?;
+        let visible = image.ctm.unit_bbox().intersect(&self.page_box).area();
+        (visible >= 0.5 * page_area).then(|| (image.id.unwrap(), image.ctm.then(self.user_to_display)))
+    }
+
     /// The scan image that is the whole visible page, with its placement
     /// in display space.
     pub fn scan_image(&self) -> Option<(ObjectId, Matrix)> {

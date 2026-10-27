@@ -15,6 +15,9 @@ use lopdf::ObjectId;
 /// Resolution for OCR and for rasterizing vector pages.
 pub const WORK_PPI: f64 = 300.0;
 
+/// Largest page render (an A3 page at 500 DPI).
+const MAX_RENDER_PIXELS: f64 = 50e6;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PageRoute {
     /// Typeset page copied as PDF objects.
@@ -209,14 +212,15 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
     } else {
         let quality = match settings.jpeg_quality() {
             Some(q) => Some(q),
-            // No compression: match a JPEG source's quality, stay lossless otherwise.
-            None => match (embedded, info) {
-                (Some((id, _)), Some(info @ ImageInfo { codec: ImageCodec::Jpeg | ImageCodec::FlateJpeg, .. })) => {
-                    let stream = pdfimage::image_stream(&source.doc, id)?;
-                    Some(encode::jpeg_quality(&pdfimage::jpeg_data(stream, &info)?).unwrap_or(90).clamp(50, 95))
+            // No compression: match the quality of the JPEG the page is
+            // made of, stay lossless otherwise.
+            None => {
+                let main = embedded.or_else(|| if page.kind == crate::model::PageKind::Scan { sp.main_image() } else { None });
+                match main {
+                    Some((id, _)) => source_jpeg_quality(source, id)?,
+                    None => None,
                 }
-                _ => None,
-            },
+            }
         };
         match quality {
             Some(q) => encode::encode_jpeg(&raster, q)?,
@@ -262,13 +266,18 @@ fn acquire(
             Placed { raster, px_to_out: px_to_unit.then(unit_to_display).then(to_out) }
         }
         _ => {
-            // Render at the scan's own resolution, or the working one.
-            let ppi = match embedded {
+            // Render at the resolution of the page's main image, if it has
+            // one, else at the working resolution.
+            let main = embedded.or_else(|| if page.kind == crate::model::PageKind::Scan { sp.main_image() } else { None });
+            let ppi = match main {
                 Some((id, unit_to_display)) => native_ppi(source, id, unit_to_display)?.unwrap_or(WORK_PPI),
                 None => WORK_PPI,
             }
-            .min(600.0);
-            let ppp = ppi / 72.0;
+            .clamp(72.0, 600.0);
+            // Bound memory: no render above MAX_RENDER_PIXELS.
+            let (dw, dh) = sp.display_size;
+            let cap = (MAX_RENDER_PIXELS / (dw / 72.0 * dh / 72.0)).sqrt();
+            let ppp = ppi.min(cap) / 72.0;
             let mut raster = render::render_page(&source.render_path, page.index, ppp, sp.display_size)?;
             if gray {
                 raster = raster.to_gray();
@@ -280,6 +289,16 @@ fn acquire(
         }
     };
     placed.crop_to_page(out_size)
+}
+
+/// Quality of a JPEG image XObject, `None` for other codecs.
+fn source_jpeg_quality(source: &Source, id: ObjectId) -> Result<Option<u8>> {
+    let Some(info) = pdfimage::inspect(&source.doc, id)? else { return Ok(None) };
+    if !matches!(info.codec, ImageCodec::Jpeg | ImageCodec::FlateJpeg) {
+        return Ok(None);
+    }
+    let stream = pdfimage::image_stream(&source.doc, id)?;
+    Ok(Some(encode::jpeg_quality(&pdfimage::jpeg_data(stream, &info)?).unwrap_or(90).clamp(50, 95)))
 }
 
 fn native_ppi(source: &Source, id: ObjectId, unit_to_display: Matrix) -> Result<Option<f64>> {
