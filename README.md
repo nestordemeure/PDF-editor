@@ -4,6 +4,8 @@ In-browser cleanup tool for scanned books. Everything runs client-side: no serve
 
 Open the [GitHub Pages version](https://nestordemeure.github.io/PDF-editor/), or run `./serve.sh` and open <http://localhost:8000> for local testing.
 
+A native Linux version, faster and with smaller output, lives in [`desktop/`](desktop/README.md).
+
 ## What it does
 
 - Load one or more PDFs and merge them; loading again appends to the current pages.

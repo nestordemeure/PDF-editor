@@ -26,6 +26,10 @@ pub struct SaveOptions {
     pub ocr_language: Option<String>,
     /// Worker threads; 0 means one per logical CPU.
     pub threads: usize,
+    /// Overrides the compression level's maximum resolution.
+    pub max_dpi: Option<f64>,
+    /// Overrides the compression level's JPEG quality (libjpeg scale).
+    pub jpeg_quality: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -86,7 +90,8 @@ fn write_document(sources: &[Arc<Source>], pages: &[Page], options: &SaveOptions
     let raster: Vec<usize> = (0..pages.len()).filter(|&i| pipeline::is_raster(&pages[i])).collect();
     let ocr_language = options.ocr_language.clone().filter(|_| !raster.is_empty());
     if let Some(lang) = &ocr_language {
-        // Fail before any work when the language is missing.
+        ocr::ensure_languages(lang, &|message| progress(0, pages.len(), message))?;
+        // Fail before any work when the model does not load.
         Engine::new(lang)?;
     }
     let layout = Layout {
@@ -158,7 +163,7 @@ fn write_document(sources: &[Arc<Source>], pages: &[Page], options: &SaveOptions
     }
 
     // Raster pages: workers produce, this thread writes.
-    let settings = Settings { compression: options.compression, ocr: ocr_language.is_some() };
+    let settings = Settings { compression: options.compression, ocr: ocr_language.is_some(), max_dpi: options.max_dpi, jpeg_quality: options.jpeg_quality };
     let (tx, rx) = mpsc::sync_channel::<(usize, Result<PageOutput>)>(threads);
     let mut shared_images: HashMap<(usize, ObjectId), OutId> = HashMap::new();
     let mut first_error: Option<anyhow::Error> = None;
@@ -288,6 +293,7 @@ fn image_dict(e: &EncodedImage) -> Dictionary {
     d.set("BitsPerComponent", Object::Integer(e.bits_per_component as i64));
     match e.filter {
         ImageFilter::Dct => d.set("Filter", Object::Name(b"DCTDecode".to_vec())),
+        ImageFilter::FlateDct => d.set("Filter", Object::Array(vec![Object::Name(b"FlateDecode".to_vec()), Object::Name(b"DCTDecode".to_vec())])),
         ImageFilter::Jbig2 => d.set("Filter", Object::Name(b"JBIG2Decode".to_vec())),
         ImageFilter::FlatePng => {
             d.set("Filter", Object::Name(b"FlateDecode".to_vec()));

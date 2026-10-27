@@ -28,3 +28,4 @@ pub fn peak_rss_mb() -> u64 {
         .and_then(|s| s.lines().find(|l| l.starts_with("VmHWM:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()))
         .map_or(0, |kb| kb / 1024)
 }
+

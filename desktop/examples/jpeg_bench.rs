@@ -17,17 +17,26 @@ fn main() -> anyhow::Result<()> {
     let ppi: f64 = args.get(2).map_or(150.0, |s| s.parse().unwrap());
     let (id, _) = source.pages[0].scan_image().expect("scan page");
     let info = pdf_editor::pdfimage::inspect(&source.doc, id)?.unwrap();
-    let full = pdf_editor::pdfimage::decode(&source.doc, id, &info)?;
+    let full = pdf_editor::pdfimage::decode(&source.doc, id, &info, false)?;
     let f = ppi / 290.0;
     let gray = full.to_gray().resize((full.width as f64 * f) as u32, (full.height as f64 * f) as u32)?;
     println!("gray {}x{}", gray.width, gray.height);
-    for q in [15u8, 25, 35, 45] {
+    for q in [20u8, 38] {
         use zenjpeg::encoder::{EncoderConfig, PixelLayout, Quality};
         let variants: Vec<(&str, EncoderConfig)> = vec![
             ("zen gray", EncoderConfig::grayscale(Quality::ApproxMozjpeg(q))),
             ("zen gray auto", EncoderConfig::grayscale(Quality::ApproxMozjpeg(q)).auto_optimize(true)),
             ("zen gray jpegli", EncoderConfig::grayscale(Quality::ApproxJpegli(q as f32))),
         ];
+        {
+            use zenjpeg::encoder::{ChromaSubsampling, EncoderConfig, PixelLayout, Quality};
+            let rgb = gray.to_rgb();
+            let mut enc = EncoderConfig::ycbcr(Quality::ApproxMozjpeg(q), ChromaSubsampling::Quarter).encode_from_bytes(gray.width, gray.height, PixelLayout::Rgb8Srgb).unwrap();
+            enc.push_packed(&rgb.data, Unstoppable).unwrap();
+            let data = enc.finish().unwrap();
+            let back = pdf_editor::encode::decode_jpeg(&data, 3)?.to_gray();
+            println!("q{q:3} {:18} {:8} bytes {:6.2} dB", "zen ycbcr of gray", data.len(), psnr(&gray, &back));
+        }
         for (name, enc) in [("moz baseline", mozjpeg_rs::Encoder::baseline_optimized()), ("moz max", mozjpeg_rs::Encoder::max_compression())] {
             let t = Instant::now();
             let data = enc.quality(q).encode_gray(&gray.data, gray.width, gray.height).unwrap();

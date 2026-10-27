@@ -114,15 +114,17 @@ impl Raster {
     }
 }
 
-/// Applies a page's pixel operations in canonical order. Bilevel modes
+/// Applies a page's pixel operations in canonical order: gray conversion
+/// (for every mode but color), cleanup, then thresholding. Bilevel modes
 /// return a gray raster holding only 0 and 255.
 pub fn apply_pixel_ops(raster: Raster, ops: PixelOps, scale: f64) -> Raster {
     apply_color_mode(apply_cleanup(raster, ops, scale), ops.color, scale)
 }
 
-/// The cleanup half of the pipeline: shading removal, then contrast.
+/// Gray conversion (unless the mode keeps color), shading removal, then
+/// contrast: everything before thresholding.
 pub fn apply_cleanup(raster: Raster, ops: PixelOps, scale: f64) -> Raster {
-    let mut r = raster;
+    let mut r = if ops.color == ColorMode::Color { raster } else { raster.to_gray() };
     if ops.remove_shading {
         r = remove_shading(&r, scale);
     }

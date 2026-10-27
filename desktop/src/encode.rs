@@ -20,6 +20,8 @@ pub struct EncodedImage {
 #[derive(Clone, Debug)]
 pub enum ImageFilter {
     Dct,
+    /// JPEG wrapped in Flate, which shrinks entropy-coded data by a few percent.
+    FlateDct,
     /// Flate with PNG predictors (`/Predictor 15`).
     FlatePng,
     Jbig2,
@@ -40,20 +42,23 @@ pub fn decode_jpeg(data: &[u8], channels: u8) -> Result<Raster> {
     Raster::new(w, h, channels, pixels)
 }
 
-/// zenjpeg setting with the same fidelity (PSNR on a scanned page) as a
-/// libjpeg/MozJPEG quality: zenjpeg keeps more detail per nominal step.
-fn zenjpeg_setting(libjpeg_quality: u8) -> u8 {
-    const POINTS: [(f64, f64); 8] = [(0.0, 1.0), (25.0, 8.0), (50.0, 20.0), (60.0, 24.0), (75.0, 38.0), (85.0, 63.0), (95.0, 88.0), (100.0, 100.0)];
+/// zenjpeg setting with the same fidelity (PSNR on a scanned page at
+/// 120 DPI) as a libjpeg/MozJPEG quality. zenjpeg keeps more detail per
+/// nominal step, and more in gray mode than in color mode.
+fn zenjpeg_setting(libjpeg_quality: u8, gray: bool) -> u8 {
+    const GRAY: [(f64, f64); 8] = [(0.0, 1.0), (25.0, 8.0), (50.0, 20.0), (60.0, 24.0), (75.0, 38.0), (85.0, 63.0), (95.0, 88.0), (100.0, 100.0)];
+    const COLOR: [(f64, f64); 8] = [(0.0, 1.0), (25.0, 10.0), (50.0, 24.0), (60.0, 30.0), (75.0, 52.0), (85.0, 73.0), (95.0, 90.0), (100.0, 100.0)];
+    let points = if gray { &GRAY } else { &COLOR };
     let q = libjpeg_quality.min(100) as f64;
-    let i = POINTS.iter().position(|p| p.0 >= q).unwrap_or(POINTS.len() - 1).max(1);
-    let ((x0, y0), (x1, y1)) = (POINTS[i - 1], POINTS[i]);
+    let i = points.iter().position(|p| p.0 >= q).unwrap_or(points.len() - 1).max(1);
+    let ((x0, y0), (x1, y1)) = (points[i - 1], points[i]);
     (y0 + (q - x0) * (y1 - y0) / (x1 - x0)).round() as u8
 }
 
 /// Encodes at the fidelity of a libjpeg quality setting.
 pub fn encode_jpeg(r: &Raster, quality: u8) -> Result<EncodedImage> {
     use zenjpeg::encoder::{ChromaSubsampling, EncoderConfig, PixelLayout, Quality};
-    let q = Quality::ApproxMozjpeg(zenjpeg_setting(quality));
+    let q = Quality::ApproxMozjpeg(zenjpeg_setting(quality, r.is_gray()));
     let (config, layout) = if r.is_gray() {
         (EncoderConfig::grayscale(q), PixelLayout::Gray8Srgb)
     } else {
@@ -62,7 +67,17 @@ pub fn encode_jpeg(r: &Raster, quality: u8) -> Result<EncodedImage> {
     let mut enc = config.encode_from_bytes(r.width, r.height, layout).map_err(|e| anyhow!("JPEG encoder: {e}"))?;
     enc.push_packed(&r.data, Unstoppable).map_err(|e| anyhow!("JPEG encode: {e}"))?;
     let data = enc.finish().map_err(|e| anyhow!("JPEG encode: {e}"))?;
-    Ok(EncodedImage { width: r.width, height: r.height, channels: r.channels, bits_per_component: 8, filter: ImageFilter::Dct, data })
+    Ok(wrap_jpeg(EncodedImage { width: r.width, height: r.height, channels: r.channels, bits_per_component: 8, filter: ImageFilter::Dct, data }))
+}
+
+/// Wraps a JPEG in Flate when that saves at least 1%.
+pub fn wrap_jpeg(e: EncodedImage) -> EncodedImage {
+    let wrapped = zlib(&e.data);
+    if wrapped.len() * 100 <= e.data.len() * 99 {
+        EncodedImage { filter: ImageFilter::FlateDct, data: wrapped, ..e }
+    } else {
+        e
+    }
 }
 
 /// Rewrites a JPEG as progressive with optimized Huffman tables, without
@@ -71,6 +86,22 @@ pub fn repack_jpeg(data: &[u8]) -> Result<Vec<u8>> {
     use zenjpeg::lossless::{OutputMode, RestructureConfig, restructure};
     let config = RestructureConfig { output_mode: OutputMode::Progressive, ..Default::default() };
     restructure(data, &config, Unstoppable).map_err(|e| anyhow!("JPEG repack: {e}"))
+}
+
+/// True when the JPEG frame is progressive (SOF2).
+pub fn is_progressive_jpeg(data: &[u8]) -> bool {
+    let mut i = 2;
+    while i + 4 <= data.len() && data[i] == 0xFF {
+        let marker = data[i + 1];
+        if marker == 0xC2 {
+            return true;
+        }
+        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC || marker == 0xDA {
+            return false;
+        }
+        i += 2 + u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+    }
+    false
 }
 
 /// Estimates the libjpeg quality setting from the luma quantization table.
@@ -224,9 +255,11 @@ mod tests {
 
     #[test]
     fn zenjpeg_mapping_is_monotonic() {
-        assert_eq!(zenjpeg_setting(50), 20);
-        assert_eq!(zenjpeg_setting(100), 100);
-        assert!((1..=100).all(|q| zenjpeg_setting(q) >= zenjpeg_setting(q - 1)));
+        assert_eq!(zenjpeg_setting(50, true), 20);
+        assert_eq!(zenjpeg_setting(100, false), 100);
+        for gray in [true, false] {
+            assert!((1..=100).all(|q| zenjpeg_setting(q, gray) >= zenjpeg_setting(q - 1, gray)));
+        }
     }
 
     #[test]

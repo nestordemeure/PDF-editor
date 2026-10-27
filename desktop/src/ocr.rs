@@ -6,7 +6,7 @@ use crate::pixel::Raster;
 use crate::writer::format_number;
 use anyhow::{Context, Result, bail};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // Links the static Tesseract and Leptonica libraries.
 use tesseract_rs as _;
@@ -53,31 +53,108 @@ pub struct OcrWord {
     pub bbox: PixelBox,
 }
 
-/// Where traineddata files live: the system's, or `$TESSDATA_PREFIX`.
-pub fn tessdata_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("TESSDATA_PREFIX") {
-        return Ok(PathBuf::from(dir));
-    }
-    for dir in ["/usr/share/tesseract-ocr/5/tessdata", "/usr/share/tesseract-ocr/4.00/tessdata", "/usr/share/tessdata"] {
-        if Path::new(dir).join("eng.traineddata").exists() {
-            return Ok(PathBuf::from(dir));
-        }
-    }
-    bail!("no Tesseract language data found; install tesseract-ocr-eng or set TESSDATA_PREFIX")
+/// Languages offered in the UI (code, name); others work when installed.
+pub const COMMON_LANGUAGES: [(&str, &str); 16] = [
+    ("eng", "English"),
+    ("fra", "French"),
+    ("deu", "German"),
+    ("spa", "Spanish"),
+    ("ita", "Italian"),
+    ("por", "Portuguese"),
+    ("nld", "Dutch"),
+    ("cat", "Catalan"),
+    ("pol", "Polish"),
+    ("ces", "Czech"),
+    ("ron", "Romanian"),
+    ("swe", "Swedish"),
+    ("fin", "Finnish"),
+    ("dan", "Danish"),
+    ("nor", "Norwegian"),
+    ("lat", "Latin"),
+];
+
+const DOWNLOAD_URL: &str = "https://github.com/tesseract-ocr/tessdata_fast/raw/main";
+
+fn system_dirs() -> Vec<PathBuf> {
+    ["/usr/share/tesseract-ocr/5/tessdata", "/usr/share/tesseract-ocr/4.00/tessdata", "/usr/share/tessdata"]
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|d| d.is_dir())
+        .collect()
 }
 
-/// Languages available in the tessdata directory.
+/// The directory Tesseract reads: `$TESSDATA_PREFIX`, or this app's data
+/// directory, which links system files and holds downloaded ones.
+pub fn tessdata_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("TESSDATA_PREFIX") {
+        return PathBuf::from(dir);
+    }
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"));
+    base.join("pdf-editor/tessdata")
+}
+
+fn model_file(lang: &str) -> String {
+    format!("{lang}.traineddata")
+}
+
+/// True when the language can be used without a download.
+pub fn is_installed(lang: &str) -> bool {
+    tessdata_dir().join(model_file(lang)).exists() || system_dirs().iter().any(|d| d.join(model_file(lang)).exists())
+}
+
+/// Installed languages, from this app's directory and the system's.
 pub fn available_languages() -> Vec<String> {
-    let Ok(dir) = tessdata_dir() else { return Vec::new() };
-    let mut langs: Vec<String> = std::fs::read_dir(dir)
-        .into_iter()
+    let mut dirs = system_dirs();
+    dirs.push(tessdata_dir());
+    let mut langs: Vec<String> = dirs
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
         .flatten()
         .flatten()
         .filter_map(|e| e.file_name().to_str()?.strip_suffix(".traineddata").map(str::to_owned))
         .filter(|l| l != "osd" && l.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
         .collect();
     langs.sort();
+    langs.dedup();
     langs
+}
+
+/// Makes every language of `spec` (e.g. `eng+fra`) usable: links system
+/// models into the data directory and downloads missing ones.
+pub fn ensure_languages(spec: &str, progress: &dyn Fn(&str)) -> Result<()> {
+    let dir = tessdata_dir();
+    if std::env::var("TESSDATA_PREFIX").is_ok() {
+        for lang in spec.split('+') {
+            if !dir.join(model_file(lang)).exists() {
+                bail!("Tesseract language '{lang}' is not in TESSDATA_PREFIX ({})", dir.display());
+            }
+        }
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    for lang in spec.split('+') {
+        if lang.is_empty() || !lang.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            bail!("invalid language code '{lang}'");
+        }
+        let target = dir.join(model_file(lang));
+        if target.exists() {
+            continue;
+        }
+        if let Some(system) = system_dirs().into_iter().map(|d| d.join(model_file(lang))).find(|p| p.exists()) {
+            std::os::unix::fs::symlink(&system, &target).with_context(|| format!("cannot link {}", system.display()))?;
+            continue;
+        }
+        progress(&format!("Downloading OCR language '{lang}'"));
+        let url = format!("{DOWNLOAD_URL}/{}", model_file(lang));
+        let mut response = ureq::get(&url).call().with_context(|| format!("cannot download {url}"))?;
+        let bytes = response.body_mut().with_config().limit(200 << 20).read_to_vec().with_context(|| format!("cannot download {url}"))?;
+        let partial = dir.join(format!("{}.part", model_file(lang)));
+        std::fs::write(&partial, &bytes)?;
+        std::fs::rename(&partial, &target)?;
+    }
+    Ok(())
 }
 
 /// A Tesseract instance. Not shareable between threads: keep one per thread.
@@ -94,7 +171,7 @@ impl Drop for Engine {
 
 impl Engine {
     pub fn new(language: &str) -> Result<Engine> {
-        let dir = tessdata_dir()?;
+        let dir = tessdata_dir();
         for lang in language.split('+') {
             if !dir.join(format!("{lang}.traineddata")).exists() {
                 bail!("Tesseract language '{lang}' is not installed in {}", dir.display());

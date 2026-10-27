@@ -8,6 +8,8 @@ use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageCodec {
     Jpeg,
+    /// JPEG inside Flate (`/Filter [/FlateDecode /DCTDecode]`).
+    FlateJpeg,
     /// Flate (or no filter), 8 bits per component.
     Flate8,
     /// Flate (or no filter), 1 bit per component, gray.
@@ -99,25 +101,46 @@ pub fn inspect(doc: &Document, id: ObjectId) -> Result<Option<ImageInfo>> {
         return Ok(None);
     }
     let Some(channels) = dict.get(b"ColorSpace").ok().and_then(|cs| color_channels(doc, cs)) else { return Ok(None) };
+    let flate_jpeg = matches!(dict.get_deref(b"Filter", doc), Ok(Object::Array(a))
+        if a.len() == 2 && a[0].as_name().ok() == Some(b"FlateDecode") && a[1].as_name().ok() == Some(b"DCTDecode"));
     let codec = match (single_filter(doc, dict), bpc) {
+        _ if flate_jpeg && bpc == 8 => ImageCodec::FlateJpeg,
         (Some(Some(b"DCTDecode")), 8) => ImageCodec::Jpeg,
         (Some(None) | Some(Some(b"FlateDecode")), 8) => ImageCodec::Flate8,
         (Some(None) | Some(Some(b"FlateDecode")), 1) if channels == 1 => ImageCodec::Flate1,
         _ => return Ok(None),
     };
-    if codec == ImageCodec::Jpeg && dict.has(b"DecodeParms") {
+    if matches!(codec, ImageCodec::Jpeg | ImageCodec::FlateJpeg) && dict.has(b"DecodeParms") {
         return Ok(None);
     }
     Ok(Some(ImageInfo { width: width as u32, height: height as u32, channels, codec, encoded_len: stream.content.len() }))
 }
 
-/// Decodes an image that `inspect` accepted.
-pub fn decode(doc: &Document, id: ObjectId, info: &ImageInfo) -> Result<Raster> {
+/// The JPEG file inside a JPEG image stream.
+pub fn jpeg_data<'a>(stream: &'a Stream, info: &ImageInfo) -> Result<std::borrow::Cow<'a, [u8]>> {
+    match info.codec {
+        ImageCodec::Jpeg => Ok(std::borrow::Cow::Borrowed(&stream.content)),
+        ImageCodec::FlateJpeg => {
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(&stream.content[..]), &mut out).context("Flate layer of a JPEG")?;
+            Ok(std::borrow::Cow::Owned(out))
+        }
+        _ => bail!("not a JPEG image"),
+    }
+}
+
+/// Decodes an image that `inspect` accepted, as gray when `gray` is set.
+pub fn decode(doc: &Document, id: ObjectId, info: &ImageInfo, gray: bool) -> Result<Raster> {
+    let raster = decode_native(doc, id, info)?;
+    Ok(if gray { raster.to_gray() } else { raster })
+}
+
+fn decode_native(doc: &Document, id: ObjectId, info: &ImageInfo) -> Result<Raster> {
     let stream = image_stream(doc, id)?;
     let (w, h) = (info.width as usize, info.height as usize);
     match info.codec {
-        ImageCodec::Jpeg => {
-            let raster = crate::encode::decode_jpeg(&stream.content, info.channels)?;
+        ImageCodec::Jpeg | ImageCodec::FlateJpeg => {
+            let raster = crate::encode::decode_jpeg(&jpeg_data(stream, info)?, info.channels)?;
             if (raster.width, raster.height) != (info.width, info.height) {
                 bail!("JPEG {id:?} is {}x{}, its dictionary says {w}x{h}", raster.width, raster.height);
             }

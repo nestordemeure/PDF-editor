@@ -18,6 +18,7 @@ mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"]
 rayon = "1"
 rfd = "0.15"
 tesseract-rs = "0.4"
+ureq = "3"
 enough = "0.4"
 tempfile = "3"
 zenjpeg = { version = "0.8", features = ["trellis"] }

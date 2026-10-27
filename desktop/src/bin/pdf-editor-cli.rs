@@ -67,6 +67,12 @@ struct Args {
     /// Tesseract language(s), e.g. eng or eng+fra; "none" disables OCR.
     #[arg(long, default_value = "eng")]
     ocr: String,
+    /// Maximum output resolution, instead of the compression level's.
+    #[arg(long)]
+    dpi: Option<f64>,
+    /// JPEG quality (libjpeg scale, 1-100), instead of the level's.
+    #[arg(long)]
+    jpeg_quality: Option<u8>,
     /// Worker threads (0: one per logical CPU).
     #[arg(long, default_value_t = 0)]
     threads: usize,
@@ -168,7 +174,7 @@ fn main() -> Result<()> {
         bail!("output would overwrite an input");
     }
 
-    let options = SaveOptions { compression, ocr_language, threads: args.threads };
+    let options = SaveOptions { compression, ocr_language, threads: args.threads, max_dpi: args.dpi, jpeg_quality: args.jpeg_quality };
     let cancel = AtomicBool::new(false);
     let last = std::sync::Mutex::new(Instant::now());
     let progress = |done: usize, total: usize, message: &str| {

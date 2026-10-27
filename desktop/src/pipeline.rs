@@ -87,11 +87,6 @@ impl Placed {
         Ok(Placed { raster, px_to_out })
     }
 
-    /// Unit square of the raster to output space (for the `cm` operator).
-    fn unit_ctm(&self) -> Matrix {
-        let (w, h) = (self.raster.width as f64, self.raster.height as f64);
-        Matrix::new(w, 0.0, 0.0, -h, 0.0, h).then(self.px_to_out)
-    }
 
     /// Rotates the pixels so text is upright on the output page, for OCR.
     fn upright(self) -> Result<Placed> {
@@ -113,11 +108,36 @@ impl Placed {
     }
 }
 
+/// Unit square of a `width × height` raster to output space (for `cm`).
+fn unit_ctm(width: u32, height: u32, px_to_out: Matrix) -> Matrix {
+    let (w, h) = (width as f64, height as f64);
+    Matrix::new(w, 0.0, 0.0, -h, 0.0, h).then(px_to_out)
+}
+
 /// Settings shared by every page of a save.
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
     pub compression: Compression,
     pub ocr: bool,
+    /// Overrides the level's maximum resolution (benchmarks, experts).
+    pub max_dpi: Option<f64>,
+    /// Overrides the level's JPEG quality (libjpeg scale).
+    pub jpeg_quality: Option<u8>,
+}
+
+impl Settings {
+    fn max_dpi(&self, mode: ColorMode) -> f64 {
+        self.max_dpi.or(self.compression.max_dpi(mode)).unwrap_or(f64::INFINITY)
+    }
+
+    fn jpeg_quality(&self) -> Option<u8> {
+        self.jpeg_quality.or(self.compression.jpeg_quality())
+    }
+
+    /// True when sources keep their resolution and quality.
+    fn keeps_originals(&self) -> bool {
+        self.compression == Compression::None && self.max_dpi.is_none() && self.jpeg_quality.is_none()
+    }
 }
 
 /// Processes a raster (not preserved) page.
@@ -137,14 +157,14 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
     if let Some((id, unit_to_display)) = embedded {
         if !page.has_pixel_ops() {
             let image_ctm = unit_to_display.then(to_out);
-            let reuse = settings.compression == Compression::None || info.is_none();
+            let reuse = settings.keeps_originals() || info.is_none();
             if reuse {
                 let smaller = match info {
                     Some(info) => lossless_shrink(source, id, &info)?,
                     None => None,
                 };
                 let text = match engine {
-                    Some(engine) => Some(ocr_layer(engine, acquire(source, sp, page, embedded, info, to_out, out_size)?)?),
+                    Some(engine) => Some(ocr_layer(engine, acquire(source, sp, page, embedded, info, to_out, out_size, true)?.limit_ppi(WORK_PPI)?)?),
                     None => None,
                 };
                 return Ok(PageOutput { size: out_size, image: ImageOut::PassThrough { id, smaller }, image_ctm, text, route: PageRoute::PassThrough });
@@ -152,37 +172,48 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
         }
     }
 
-    let placed = acquire(source, sp, page, embedded, info, to_out, out_size)?;
+    let gray_only = page.color != ColorMode::Color;
+    let placed = acquire(source, sp, page, embedded, info, to_out, out_size, gray_only)?;
     let route = if info.is_some() { PageRoute::Reencoded } else { PageRoute::Rendered };
-    let source_ppi = placed.ppi();
     let ops = page.pixel_ops();
+    let target_ppi = settings.max_dpi(page.color);
 
+    // OCR reads the cleaned gray image at up to WORK_PPI; the output uses
+    // the level's resolution. When both are the same, clean up once.
+    let same = placed.ppi().min(WORK_PPI) == placed.ppi().min(target_ppi);
+    let ocr_placed = match (&engine, same) {
+        (Some(_), false) => Some(Placed { raster: placed.raster.clone(), px_to_out: placed.px_to_out }.limit_ppi(WORK_PPI)?),
+        _ => None,
+    };
+    let work = placed.limit_ppi(target_ppi)?;
+    let scale = work.ppi() / 300.0;
+    let cleaned = pixel::apply_cleanup(work.raster, ops, scale);
     let text = match engine {
         Some(engine) => {
-            let ocr_input = Placed { raster: placed.raster.clone(), px_to_out: placed.px_to_out }.limit_ppi(WORK_PPI)?;
-            let scale = ocr_input.ppi() / 300.0;
-            let gray = pixel::apply_cleanup(ocr_input.raster, ops, scale).to_gray();
-            Some(ocr_layer(engine, Placed { raster: gray, px_to_out: ocr_input.px_to_out })?)
+            let ocr_input = match ocr_placed {
+                Some(p) => {
+                    let s = p.ppi() / 300.0;
+                    Placed { raster: pixel::apply_cleanup(p.raster, ops, s).to_gray(), px_to_out: p.px_to_out }
+                }
+                None => Placed { raster: cleaned.to_gray(), px_to_out: work.px_to_out },
+            };
+            Some(ocr_layer(engine, ocr_input)?)
         }
         None => None,
     };
-
-    let target_ppi = settings.compression.max_dpi(page.color).unwrap_or(f64::INFINITY);
-    let work = placed.limit_ppi(target_ppi)?;
-    let scale = work.ppi() / 300.0;
-    let raster = pixel::apply_pixel_ops(work.raster, ops, scale);
-    let image_ctm = Placed { raster: raster.clone(), px_to_out: work.px_to_out }.unit_ctm();
+    let image_ctm = unit_ctm(cleaned.width, cleaned.height, work.px_to_out);
+    let raster = pixel::apply_color_mode(cleaned, page.color, scale);
 
     let encoded = if page.color.is_bilevel() {
         encode::encode_jbig2(&raster)?
     } else {
-        let quality = match settings.compression.jpeg_quality() {
+        let quality = match settings.jpeg_quality() {
             Some(q) => Some(q),
             // No compression: match a JPEG source's quality, stay lossless otherwise.
             None => match (embedded, info) {
-                (Some((id, _)), Some(ImageInfo { codec: ImageCodec::Jpeg, .. })) => {
+                (Some((id, _)), Some(info @ ImageInfo { codec: ImageCodec::Jpeg | ImageCodec::FlateJpeg, .. })) => {
                     let stream = pdfimage::image_stream(&source.doc, id)?;
-                    Some(encode::jpeg_quality(&stream.content).unwrap_or(90).clamp(50, 95))
+                    Some(encode::jpeg_quality(&pdfimage::jpeg_data(stream, &info)?).unwrap_or(90).clamp(50, 95))
                 }
                 _ => None,
             },
@@ -209,7 +240,6 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
             }
         }
     }
-    let _ = source_ppi;
     Ok(PageOutput { size: out_size, image: ImageOut::Encoded(encoded), image_ctm, text, route })
 }
 
@@ -222,10 +252,11 @@ fn acquire(
     info: Option<ImageInfo>,
     to_out: Matrix,
     out_size: (f64, f64),
+    gray: bool,
 ) -> Result<Placed> {
     let placed = match (embedded, info) {
         (Some((id, unit_to_display)), Some(info)) => {
-            let raster = pdfimage::decode(&source.doc, id, &info)?;
+            let raster = pdfimage::decode(&source.doc, id, &info, gray)?;
             let (w, h) = (raster.width as f64, raster.height as f64);
             let px_to_unit = Matrix::new(1.0 / w, 0.0, 0.0, -1.0 / h, 0.0, 1.0);
             Placed { raster, px_to_out: px_to_unit.then(unit_to_display).then(to_out) }
@@ -238,7 +269,10 @@ fn acquire(
             }
             .min(600.0);
             let ppp = ppi / 72.0;
-            let raster = render::render_page(&source.render_path, page.index, ppp, sp.display_size)?;
+            let mut raster = render::render_page(&source.render_path, page.index, ppp, sp.display_size)?;
+            if gray {
+                raster = raster.to_gray();
+            }
             let (w, h) = (raster.width as f64, raster.height as f64);
             let (dw, dh) = sp.display_size;
             let px_to_display = Matrix::new(dw / w, 0.0, 0.0, -dh / h, 0.0, dh);
@@ -268,16 +302,20 @@ fn ocr_layer(engine: &mut Engine, placed: Placed) -> Result<Vec<u8>> {
 pub fn lossless_shrink(source: &Source, id: ObjectId, info: &ImageInfo) -> Result<Option<EncodedImage>> {
     let stream = pdfimage::image_stream(&source.doc, id)?;
     let candidate = match info.codec {
-        ImageCodec::Jpeg => EncodedImage {
-            width: info.width,
-            height: info.height,
-            channels: info.channels,
-            bits_per_component: 8,
-            filter: ImageFilter::Dct,
-            data: encode::repack_jpeg(&stream.content)?,
-        },
-        ImageCodec::Flate8 => encode::encode_flate_png(&pdfimage::decode(&source.doc, id, info)?),
-        ImageCodec::Flate1 => encode::encode_jbig2(&pdfimage::decode(&source.doc, id, info)?)?,
+        ImageCodec::Jpeg | ImageCodec::FlateJpeg => {
+            let jpeg = pdfimage::jpeg_data(stream, info)?;
+            // Progressive JPEGs already have optimized entropy coding.
+            let data = if encode::is_progressive_jpeg(&jpeg) {
+                jpeg.into_owned()
+            } else {
+                let repacked = encode::repack_jpeg(&jpeg)?;
+                if repacked.len() < jpeg.len() { repacked } else { jpeg.into_owned() }
+            };
+            let plain = EncodedImage { width: info.width, height: info.height, channels: info.channels, bits_per_component: 8, filter: ImageFilter::Dct, data };
+            encode::wrap_jpeg(plain)
+        }
+        ImageCodec::Flate8 => encode::encode_flate_png(&pdfimage::decode(&source.doc, id, info, false)?),
+        ImageCodec::Flate1 => encode::encode_jbig2(&pdfimage::decode(&source.doc, id, info, false)?)?,
     };
     Ok((candidate.data.len() < info.encoded_len).then_some(candidate))
 }
@@ -287,8 +325,8 @@ pub fn recompress_preserved_image(source: &Source, id: ObjectId, compression: Co
     let Some(info) = pdfimage::inspect(&source.doc, id)? else { return Ok(None) };
     let Some(quality) = compression.jpeg_quality() else { return lossless_shrink(source, id, &info) };
     let candidate = match info.codec {
-        ImageCodec::Flate1 => encode::encode_jbig2(&pdfimage::decode(&source.doc, id, &info)?)?,
-        _ => encode::encode_jpeg(&pdfimage::decode(&source.doc, id, &info)?, quality)?,
+        ImageCodec::Flate1 => encode::encode_jbig2(&pdfimage::decode(&source.doc, id, &info, false)?)?,
+        _ => encode::encode_jpeg(&pdfimage::decode(&source.doc, id, &info, false)?, quality)?,
     };
     if candidate.data.len() < info.encoded_len {
         return Ok(Some(candidate));

@@ -40,8 +40,13 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> Self {
         let ctx = cc.egui_ctx.clone();
-        let languages = pdf_editor::ocr::available_languages();
-        let ocr_language = languages.iter().find(|l| *l == "eng").or(languages.first()).cloned();
+        let mut languages: Vec<String> = pdf_editor::ocr::COMMON_LANGUAGES.iter().map(|(c, _)| c.to_string()).collect();
+        for lang in pdf_editor::ocr::available_languages() {
+            if !languages.contains(&lang) {
+                languages.push(lang);
+            }
+        }
+        let ocr_language = Some("eng".to_owned());
         let mut app = App {
             doc: Document::default(),
             thumbs: Thumbnails::new(ctx.clone()),
@@ -95,7 +100,7 @@ impl App {
             dialog = dialog.set_directory(dir);
         }
         let Some(path) = dialog.save_file() else { return };
-        let options = SaveOptions { compression: self.compression, ocr_language: self.ocr_language.clone(), threads: 0 };
+        let options = SaveOptions { compression: self.compression, ocr_language: self.ocr_language.clone(), threads: 0, max_dpi: None, jpeg_quality: None };
         self.status = "Saving...".into();
         self.jobs.save(self.doc.sources.clone(), pages, options, path);
     }
@@ -189,17 +194,16 @@ impl App {
                 }
             });
             let ocr_label = self.ocr_language.as_deref().map_or("No OCR".to_owned(), language_label);
-            egui::ComboBox::from_id_salt("ocr").selected_text(ocr_label).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("ocr").selected_text(ocr_label).height(400.0).show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.ocr_language, None, "No OCR");
                 for lang in self.languages.clone() {
                     let label = language_label(&lang);
                     ui.selectable_value(&mut self.ocr_language, Some(lang), label);
                 }
-                if self.languages.len() > 1 {
-                    let all = self.languages.join("+");
-                    ui.selectable_value(&mut self.ocr_language, Some(all.clone()), format!("All installed ({all})"));
-                }
-            });
+                ui.selectable_value(&mut self.ocr_language, Some(MULTI.to_owned()), language_label(MULTI));
+            })
+            .response
+            .on_hover_text("Missing languages are downloaded (a few MB) on the first save.");
             let can_save = !busy && !self.doc.pages.is_empty();
             if ui.add_enabled(can_save, egui::Button::new("💾 Save PDF")).on_hover_text("Ctrl+S").clicked() {
                 self.pick_and_save();
@@ -477,27 +481,17 @@ impl App {
     }
 }
 
+/// The web app's multi-language choice.
+const MULTI: &str = "eng+fra+deu+spa+ita+por";
+
 fn language_label(code: &str) -> String {
-    let name = match code {
-        "eng" => "English",
-        "fra" => "French",
-        "deu" => "German",
-        "spa" => "Spanish",
-        "ita" => "Italian",
-        "por" => "Portuguese",
-        "nld" => "Dutch",
-        "cat" => "Catalan",
-        "pol" => "Polish",
-        "ces" => "Czech",
-        "ron" => "Romanian",
-        "swe" => "Swedish",
-        "fin" => "Finnish",
-        "dan" => "Danish",
-        "nor" => "Norwegian",
-        "lat" => "Latin",
-        _ => return code.to_owned(),
+    let name = if code == MULTI {
+        "Multi (EN/FR/DE/ES/IT/PT)".to_owned()
+    } else {
+        pdf_editor::ocr::COMMON_LANGUAGES.iter().find(|(c, _)| *c == code).map_or(code.to_owned(), |(_, n)| n.to_string())
     };
-    name.to_owned()
+    let missing = code.split('+').any(|l| !pdf_editor::ocr::is_installed(l));
+    if missing { format!("{name} (download)") } else { name }
 }
 
 /// Insertion index for a drop at `pos`: before the card under the pointer,
