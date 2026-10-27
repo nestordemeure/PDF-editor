@@ -1,0 +1,34 @@
+[package]
+name = "pdf-editor"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+default-run = "pdf-editor"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+eframe = "0.35"
+fast_image_resize = "5"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+jbig2enc-rust = "0.5"
+lopdf = "0.46"
+mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }
+rayon = "1"
+rfd = "0.15"
+tesseract-rs = "0.4"
+enough = "0.4"
+tempfile = "3"
+zenjpeg = { version = "0.8", features = ["trellis"] }
+
+[profile.release]
+debug = 1
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[dev-dependencies]
+mozjpeg-rs = "0.9"
