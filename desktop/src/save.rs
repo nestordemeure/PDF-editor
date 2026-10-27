@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 #[derive(Clone, Debug)]
@@ -56,7 +56,7 @@ fn with_engine<T>(language: &str, f: impl FnOnce(&mut Engine) -> Result<T>) -> R
     })
 }
 
-pub fn save(sources: &[Source], pages: &[Page], options: &SaveOptions, out_path: &Path, progress: Progress, cancel: &AtomicBool) -> Result<SaveReport> {
+pub fn save(sources: &[Arc<Source>], pages: &[Page], options: &SaveOptions, out_path: &Path, progress: Progress, cancel: &AtomicBool) -> Result<SaveReport> {
     if pages.is_empty() {
         bail!("no pages to save");
     }
@@ -64,6 +64,9 @@ pub fn save(sources: &[Source], pages: &[Page], options: &SaveOptions, out_path:
     let dir = out_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let tmp = tempfile::Builder::new().prefix(".pdf-editor-").suffix(".pdf").tempfile_in(dir)?.into_temp_path();
     let mut report = write_document(sources, pages, options, &tmp, progress, cancel)?;
+    // Temporary files are private; the result should not be.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
     tmp.persist(out_path).map_err(|e| anyhow!("cannot write {}: {}", out_path.display(), e.error))?;
     report.bytes = std::fs::metadata(out_path)?.len();
     report.seconds = start.elapsed().as_secs_f64();
@@ -78,7 +81,7 @@ struct Layout {
     font: Option<OutId>,
 }
 
-fn write_document(sources: &[Source], pages: &[Page], options: &SaveOptions, path: &Path, progress: Progress, cancel: &AtomicBool) -> Result<SaveReport> {
+fn write_document(sources: &[Arc<Source>], pages: &[Page], options: &SaveOptions, path: &Path, progress: Progress, cancel: &AtomicBool) -> Result<SaveReport> {
     let mut w = PdfWriter::create(path)?;
     let raster: Vec<usize> = (0..pages.len()).filter(|&i| pipeline::is_raster(&pages[i])).collect();
     let ocr_language = options.ocr_language.clone().filter(|_| !raster.is_empty());
@@ -464,7 +467,7 @@ fn write_ocr_font(w: &mut PdfWriter, font: OutId) -> Result<()> {
 
 /// Default output name: source name (or "merged"), compression, dominant
 /// color mode, and "ocr".
-pub fn default_file_name(sources: &[Source], pages: &[Page], compression: Compression, ocr: bool) -> String {
+pub fn default_file_name(sources: &[Arc<Source>], pages: &[Page], compression: Compression, ocr: bool) -> String {
     let used: HashSet<usize> = pages.iter().map(|p| p.source).collect();
     let names: HashSet<&str> = used.iter().map(|&s| sources[s].name.as_str()).collect();
     let base = if names.len() == 1 { names.into_iter().next().unwrap().to_owned() } else { "merged".to_owned() };

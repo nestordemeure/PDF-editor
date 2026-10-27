@@ -151,6 +151,7 @@ fn main() -> Result<()> {
         }
     }
 
+    let sources: Vec<std::sync::Arc<Source>> = sources.into_iter().map(std::sync::Arc::new).collect();
     let compression = match args.compression {
         CompressionArg::None => Compression::None,
         CompressionArg::Low => Compression::Low,

@@ -9,6 +9,7 @@ default-run = "pdf-editor"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 eframe = "0.35"
+egui = "0.35"
 fast_image_resize = "5"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 jbig2enc-rust = "0.5"

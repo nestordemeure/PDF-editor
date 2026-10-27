@@ -3404,6 +3404,7 @@ dependencies = [
  "anyhow",
  "clap",
  "eframe",
+ "egui",
  "enough",
  "fast_image_resize",
  "flate2",

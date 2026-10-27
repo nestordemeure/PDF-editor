@@ -312,3 +312,14 @@ pub fn color_tag(pages: &[Page]) -> &'static str {
         .unwrap_or(ColorMode::Color);
     best.file_tag()
 }
+
+/// Preview of a page from a render of its source page (display space, any
+/// resolution): the same view and pixel operations as the saved page.
+pub fn preview(base: &Raster, page: &Page, display_size: (f64, f64)) -> Raster {
+    let c = page.view.crop;
+    let (w, h) = (base.width as f64, base.height as f64);
+    let cropped = base.crop((c.x0 * w).round() as u32, (c.y0 * h).round() as u32, (c.x1 * w).round() as u32, (c.y1 * h).round() as u32);
+    let turned = cropped.rotate_cw(page.view.quarter_turns);
+    let ppi = base.width as f64 * 72.0 / display_size.0;
+    pixel::apply_pixel_ops(turned, page.pixel_ops(), ppi / 300.0)
+}
