@@ -151,29 +151,58 @@ impl Settings {
     }
 }
 
-/// Processes a raster (not preserved) page.
-pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Option<&mut Engine>) -> Result<PageOutput> {
-    let sp = &source.pages[page.index];
-    let display = sp.display_size;
-    let to_out = page.view.display_to_output(display);
-    let out_size = page.view.output_size(display);
+/// What a raster page will be made from, decided without decoding pixels.
+struct Plan {
+    embedded: Option<(ObjectId, Matrix)>,
+    info: Option<ImageInfo>,
+    /// The pixel operations change nothing on the embedded image.
+    ops_are_noop: bool,
+    /// The intended route; re-encoding still falls back to pass-through
+    /// when it is not smaller, and exact gray to re-encoding when it fails.
+    route: PageRoute,
+}
 
+fn plan(source: &Source, page: &Page, settings: Settings) -> Result<Plan> {
+    let sp = &source.pages[page.index];
     let embedded = if page.kind == crate::model::PageKind::Scan { sp.scan_image() } else { None };
     let info = match embedded {
         Some((id, _)) => pdfimage::inspect(&source.doc, id)?,
         None => None,
     };
-
-    // Pages whose pixel operations do nothing on this image (or that have
-    // none) keep their image stream.
-    let ops_are_noop = !page.remove_shading
-        && !page.enhance_contrast
+    let cleanup = page.remove_shading || page.enhance_contrast;
+    let ops_are_noop = !cleanup
         && match (page.color, info) {
             (ColorMode::Color, _) => true,
             (ColorMode::Gray, Some(i)) => i.channels == 1,
             (ColorMode::BwFlat, Some(i)) => i.codec == ImageCodec::Flate1,
             _ => false,
         };
+    let color_jpeg = info.is_some_and(|i| matches!(i.codec, ImageCodec::Jpeg | ImageCodec::FlateJpeg) && i.channels == 3);
+    let route = match (embedded, info) {
+        (Some(_), _) if ops_are_noop && (settings.keeps_originals() || info.is_none()) => PageRoute::PassThrough,
+        (Some(_), Some(_)) if page.color == ColorMode::Gray && !cleanup && settings.keeps_originals() && color_jpeg => PageRoute::ExactGray,
+        (Some(_), Some(_)) => PageRoute::Reencoded,
+        _ => PageRoute::Rendered,
+    };
+    Ok(Plan { embedded, info, ops_are_noop, route })
+}
+
+/// The route a page is meant to take at save time.
+pub fn intended_route(source: &Source, page: &Page, settings: Settings) -> Result<PageRoute> {
+    if page.is_preserved() {
+        return Ok(PageRoute::Copied);
+    }
+    Ok(plan(source, page, settings)?.route)
+}
+
+/// Processes a raster (not preserved) page.
+pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Option<&mut Engine>) -> Result<PageOutput> {
+    let sp = &source.pages[page.index];
+    let display = sp.display_size;
+    let to_out = page.view.display_to_output(display);
+    let out_size = page.view.output_size(display);
+    let Plan { embedded, info, ops_are_noop, route: planned } = plan(source, page, settings)?;
+
     if let Some((id, unit_to_display)) = embedded {
         let image_ctm = unit_to_display.then(to_out);
         let ocr = |engine: Option<&mut Engine>| -> Result<Option<Vec<u8>>> {
@@ -182,7 +211,7 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
                 None => Ok(None),
             }
         };
-        if ops_are_noop && (settings.keeps_originals() || info.is_none()) {
+        if planned == PageRoute::PassThrough {
             let smaller = match info {
                 Some(info) => lossless_shrink(source, id, &info)?,
                 None => None,
@@ -191,8 +220,7 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
             return Ok(PageOutput { size: out_size, image: ImageOut::PassThrough { id, smaller }, image_ctm, text, route: PageRoute::PassThrough });
         }
         // Grayscale without re-encoding: keep the JPEG's luma channel.
-        let plain_gray = page.color == ColorMode::Gray && !page.remove_shading && !page.enhance_contrast;
-        if let (true, true, Some(info)) = (plain_gray, settings.keeps_originals(), info) {
+        if let (PageRoute::ExactGray, Some(info)) = (planned, info) {
             if let Some(image) = exact_gray(source, id, &info)? {
                 let text = ocr(engine)?;
                 return Ok(PageOutput { size: out_size, image: ImageOut::Derived { id, image }, image_ctm, text, route: PageRoute::ExactGray });

@@ -39,12 +39,11 @@ pub struct Progress {
 pub struct Job {
     pub progress: Arc<Mutex<Progress>>,
     pub cancel: Arc<AtomicBool>,
-    pub cancellable: bool,
 }
 
 impl Job {
-    fn new(cancellable: bool) -> Job {
-        Job { progress: Default::default(), cancel: Default::default(), cancellable }
+    fn new() -> Job {
+        Job { progress: Default::default(), cancel: Default::default() }
     }
 
     pub fn snapshot(&self) -> Progress {
@@ -53,6 +52,10 @@ impl Job {
 
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn cancelling(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
     }
 }
 
@@ -74,17 +77,26 @@ impl Jobs {
     }
 
     pub fn load(&mut self, paths: Vec<PathBuf>) {
-        let job = Job::new(false);
-        let progress = job.progress.clone();
+        let job = Job::new();
+        let (progress, cancel) = (job.progress.clone(), job.cancel.clone());
         self.current = Some(job);
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         std::thread::spawn(move || {
             let total = paths.len();
             for (i, path) in paths.into_iter().enumerate() {
+                if cancel.load(Ordering::Relaxed) {
+                    let _ = tx.send(Event::LoadFailed("cancelled".into()));
+                    break;
+                }
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 *progress.lock().unwrap() = Progress { done: i, total, message: format!("Loading {name}") };
                 ctx.request_repaint();
                 match load_one(&path, &tx, &ctx) {
+                    // A file parsed after Cancel is dropped.
+                    Ok(_) if cancel.load(Ordering::Relaxed) => {
+                        let _ = tx.send(Event::LoadFailed("cancelled".into()));
+                        break;
+                    }
                     Ok(event) => {
                         let _ = tx.send(event);
                     }
@@ -100,7 +112,7 @@ impl Jobs {
     }
 
     pub fn save(&mut self, sources: Vec<Arc<Source>>, pages: Vec<Page>, options: SaveOptions, path: PathBuf) {
-        let job = Job::new(true);
+        let job = Job::new();
         let (progress, cancel) = (job.progress.clone(), job.cancel.clone());
         self.current = Some(job);
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());

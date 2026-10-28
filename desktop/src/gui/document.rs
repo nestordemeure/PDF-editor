@@ -21,6 +21,8 @@ pub struct Document {
     undo: Vec<Vec<PageEntry>>,
     redo: Vec<Vec<PageEntry>>,
     next_id: u64,
+    /// Changes whenever the pages change.
+    pub revision: u64,
 }
 
 impl Document {
@@ -33,6 +35,7 @@ impl Document {
     fn checkpoint(&mut self) {
         self.undo.push(self.pages.clone());
         self.redo.clear();
+        self.revision += 1;
     }
 
     pub fn can_undo(&self) -> bool {
@@ -45,6 +48,7 @@ impl Document {
 
     pub fn undo(&mut self) {
         if let Some(previous) = self.undo.pop() {
+            self.revision += 1;
             self.redo.push(std::mem::replace(&mut self.pages, previous));
             self.prune_selection();
         }
@@ -52,6 +56,7 @@ impl Document {
 
     pub fn redo(&mut self) {
         if let Some(next) = self.redo.pop() {
+            self.revision += 1;
             self.undo.push(std::mem::replace(&mut self.pages, next));
             self.prune_selection();
         }
@@ -127,15 +132,18 @@ impl Document {
         self.edit_selected(|p| p.enhance_contrast = true);
     }
 
-    pub fn split_selected(&mut self) {
+    /// Splits the selected pages. Returns (old id, left half id) pairs.
+    pub fn split_selected(&mut self) -> Vec<(u64, u64)> {
+        let mut halves = Vec::new();
         if self.selected.is_empty() {
-            return;
+            return halves;
         }
         self.checkpoint();
         let old = std::mem::take(&mut self.pages);
         for entry in old {
             if self.selected.contains(&entry.id) {
                 let (left, right) = (self.new_id(), self.new_id());
+                halves.push((entry.id, left));
                 let mut l = entry.page.clone();
                 l.view = l.view.split(Side::Left);
                 let mut r = entry.page;
@@ -147,6 +155,7 @@ impl Document {
             }
         }
         self.selected.clear();
+        halves
     }
 
     pub fn delete_selected(&mut self) {

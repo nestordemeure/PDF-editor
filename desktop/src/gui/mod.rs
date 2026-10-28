@@ -8,6 +8,7 @@ use document::Document;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Id, Key, Layout, Modifiers, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use jobs::{Event, Jobs, TextChoice};
 use pdf_editor::model::{ColorMode, Compression, PageKind};
+use pdf_editor::pipeline::PageRoute;
 use pdf_editor::save::{SaveOptions, default_file_name};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
@@ -35,6 +36,8 @@ pub struct App {
     dragging: Option<usize>,
     last_dir: Option<PathBuf>,
     close_after_job: bool,
+    /// Save plan summary for (document revision, compression).
+    plan: Option<((u64, Compression), String)>,
 }
 
 impl App {
@@ -62,6 +65,7 @@ impl App {
             dragging: None,
             last_dir: None,
             close_after_job: false,
+            plan: None,
         };
         if !files.is_empty() {
             app.load(files);
@@ -118,6 +122,7 @@ impl App {
                         self.errors.push(w);
                     }
                 }
+                Event::LoadFailed(e) if e == "cancelled" => self.status = "Loading cancelled.".into(),
                 Event::LoadFailed(e) => {
                     self.status = "Loading failed.".into();
                     self.errors.push(e);
@@ -159,7 +164,15 @@ impl App {
         if pressed(Modifiers::COMMAND, Key::S) {
             self.pick_and_save();
         }
-        if self.jobs.busy() || typing {
+        if self.jobs.busy() {
+            if pressed(Modifiers::NONE, Key::Escape) {
+                if let Some(job) = &self.jobs.current {
+                    job.cancel();
+                }
+            }
+            return;
+        }
+        if typing {
             return;
         }
         if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || pressed(Modifiers::COMMAND, Key::Y) {
@@ -218,14 +231,58 @@ impl App {
                 let fraction = if p.total > 0 { p.done as f32 / p.total as f32 } else { 0.0 };
                 ui.add(egui::ProgressBar::new(fraction).desired_width(220.0).text(format!("{}/{}", p.done, p.total)));
                 ui.label(&p.message);
-                if job.cancellable && ui.button("Cancel").clicked() {
+                if job.cancelling() {
+                    ui.label("Cancelling…");
+                } else if ui.button("Cancel").on_hover_text("Esc").clicked() {
                     job.cancel();
                 }
                 ui.spinner();
             } else {
                 ui.label(&self.status);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.weak(self.plan_summary()).on_hover_text("How the pages will be saved with the current settings");
+                });
             }
         });
+    }
+
+    /// "Save plan" line: how many pages take each route.
+    fn plan_summary(&mut self) -> String {
+        let key = (self.doc.revision, self.compression);
+        if let Some((k, text)) = &self.plan {
+            if *k == key {
+                return text.clone();
+            }
+        }
+        let settings = pdf_editor::pipeline::Settings { compression: self.compression, ocr: false, max_dpi: None, jpeg_quality: None };
+        let mut counts: Vec<(PageRoute, usize)> = Vec::new();
+        let mut failed = None;
+        for e in &self.doc.pages {
+            match pdf_editor::pipeline::intended_route(&self.doc.sources[e.page.source], &e.page, settings) {
+                Ok(route) => match counts.iter_mut().find(|(r, _)| *r == route) {
+                    Some((_, n)) => *n += 1,
+                    None => counts.push((route, 1)),
+                },
+                Err(err) => failed = Some(format!("{err:#}")),
+            }
+        }
+        let label = |r: PageRoute| match r {
+            PageRoute::Copied => "text pages copied",
+            PageRoute::PassThrough => "original images kept",
+            PageRoute::ExactGray => "exact grayscale",
+            PageRoute::Reencoded => "re-encoded",
+            PageRoute::Rendered => "rendered",
+        };
+        counts.sort_by_key(|(r, _)| *r as u8);
+        let mut text = counts.iter().map(|(r, n)| format!("{n} {}", label(*r))).collect::<Vec<_>>().join(" · ");
+        if let Some(e) = failed {
+            text = format!("{text} · plan error: {e}");
+        }
+        if !text.is_empty() {
+            text = format!("Save plan: {text}");
+        }
+        self.plan = Some((key, text.clone()));
+        text
     }
 
     fn operations(&mut self, ui: &mut egui::Ui) {
@@ -242,7 +299,11 @@ impl App {
             self.doc.rotate_selected();
         }
         if wide(ui, "✂ Split double pages", "Keep the left and right halves as two pages") {
-            self.doc.split_selected();
+            for (old, left) in self.doc.split_selected() {
+                if self.preview == Some(old) {
+                    self.preview = Some(left);
+                }
+            }
         }
         if wide(ui, "🔆 Remove shadows", "Flatten uneven lighting and paper tint") {
             self.doc.remove_shading_selected();
@@ -456,6 +517,12 @@ impl App {
                 }
                 if choice(ui, "Rasterize", "Pages are converted to images and treated like scans: cleanup, recompression, and fresh OCR if enabled.") {
                     answer = Some(TextChoice::Rasterize);
+                }
+                if ui.button("Cancel loading").clicked() {
+                    if let Some(job) = &self.jobs.current {
+                        job.cancel();
+                    }
+                    answer = Some(TextChoice::Keep);
                 }
             });
             if let Some(a) = answer {
