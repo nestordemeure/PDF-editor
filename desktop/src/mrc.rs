@@ -23,6 +23,9 @@ const MAX_GLYPH_INCHES: f64 = 0.6;
 /// Components inside a window with more ink than this share are parts of
 /// a picture (halftone dots, texture).
 const MAX_INK_DENSITY: f32 = 0.65;
+/// Where a glyph's edge is cut, from its ink (0) to the paper (1): halfway
+/// loses the hairlines of soft scans, more makes letters bold.
+const EDGE_CUT: f64 = 0.7;
 /// Ink color changes slowly: its layer has this resolution.
 const INK_PPI: f64 = 16.0;
 
@@ -30,14 +33,16 @@ const INK_PPI: f64 = 16.0;
 /// the background gets `background_size`.
 pub fn separate(cleaned: &Raster, scale: f64, background_size: (u32, u32)) -> anyhow::Result<Layers> {
     let (w, h) = (cleaned.width as usize, cleaned.height as usize);
-    let ink: Vec<bool> = pixel::apply_color_mode(cleaned.to_gray(), ColorMode::BwAdaptive, scale).data.iter().map(|&v| v < 128).collect();
-    let keep = text_components(&ink, w, h, scale);
+    let gray = cleaned.to_gray();
+    let ink: Vec<bool> = pixel::apply_color_mode(gray.clone(), ColorMode::BwAdaptive, scale).data.iter().map(|&v| v < 128).collect();
+    let (glyphs, keep) = text_components(&ink, &gray.data, w, h, scale);
     drop(ink);
 
     let mask: Vec<u8> = keep.iter().map(|&k| if k { 0 } else { 255 }).collect();
     // Letter edges are softer than the threshold: keep them out of the
     // background too.
-    let hole = dilate(&keep, w, h, ((1.5 * scale).round() as usize).max(1));
+    let hole = dilate(&glyphs, w, h, ((1.5 * scale).round() as usize).max(1));
+    drop(glyphs);
     // Paper under the text, from a coarse estimate of the page around it.
     let coarse_factor = ((4.0 * scale).round() as u32).max(1);
     let coarse = fill_downsample(cleaned, &hole, coarse_factor, false);
@@ -52,7 +57,7 @@ pub fn separate(cleaned: &Raster, scale: f64, background_size: (u32, u32)) -> an
         }
     }
     let background = if background_size == (filled.width, filled.height) { filled } else { filled.resize(background_size.0, background_size.1)? };
-    // Ink color: the darker half of the ink in each block (edges are
+    // Ink color: the darkest quarter of the ink in each block (edges are
     // lighter than strokes).
     let not_ink: Vec<bool> = keep.iter().map(|&k| !k).collect();
     let ink_factor = ((300.0 * scale / INK_PPI).round() as u32).max(1);
@@ -61,9 +66,11 @@ pub fn separate(cleaned: &Raster, scale: f64, background_size: (u32, u32)) -> an
     Ok(Layers { mask: Raster { width: w as u32, height: h as u32, channels: 1, data: mask }, background, foreground })
 }
 
-/// Pixels of the connected components (8-connected) that look like
-/// glyphs: small enough, and not in dense ink.
-fn text_components(ink: &[bool], w: usize, h: usize, scale: f64) -> Vec<bool> {
+/// The connected components (8-connected) of `ink` that look like glyphs
+/// (small enough, not in dense ink), and their ink. Adaptive thresholds
+/// find letters well but take their soft edges for ink: each glyph is cut
+/// at a gray level `EDGE_CUT` of the way from its ink to the paper around it.
+fn text_components(ink: &[bool], gray: &[u8], w: usize, h: usize, scale: f64) -> (Vec<bool>, Vec<bool>) {
     let mut label = vec![u32::MAX; w * h];
     let mut parent: Vec<u32> = Vec::new();
     fn find(parent: &mut [u32], mut x: u32) -> u32 {
@@ -137,7 +144,43 @@ fn text_components(ink: &[bool], w: usize, h: usize, scale: f64) -> Vec<bool> {
         let (bw, bh) = (b.2 - b.0 + 1, b.3 - b.1 + 1);
         glyph[r] = bw <= max_side && bh <= max_side && dense[r] * 2 < b.4;
     }
-    label.iter().map(|&l| l != u32::MAX && glyph[l as usize]).collect()
+    let mut cut = vec![0u8; parent.len()];
+    let mut values: Vec<u8> = Vec::new();
+    for (r, b) in boxes.iter().enumerate() {
+        if !glyph[r] {
+            continue;
+        }
+        // Ink: the darkest tenth of the glyph. Paper: the lightest tenth
+        // of its box, one stroke wider.
+        values.clear();
+        let (x0, y0, x1, y1) = (b.0.saturating_sub(2), b.1.saturating_sub(2), (b.2 + 3).min(w), (b.3 + 3).min(h));
+        let mut glyph_values: Vec<u8> = Vec::new();
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = y * w + x;
+                if label[i] == r as u32 {
+                    glyph_values.push(gray[i]);
+                } else {
+                    values.push(gray[i]);
+                }
+            }
+        }
+        let ink_level = percentile(&mut glyph_values, 0.1);
+        let paper_level = if values.is_empty() { 255 } else { percentile(&mut values, 0.9) };
+        cut[r] = (ink_level as f64 + EDGE_CUT * (paper_level as f64 - ink_level as f64)).round() as u8;
+    }
+    let glyphs: Vec<bool> = label.iter().map(|&l| l != u32::MAX && glyph[l as usize]).collect();
+    let keep = (0..w * h).map(|i| glyphs[i] && gray[i] < cut[label[i] as usize]).collect();
+    (glyphs, keep)
+}
+
+/// The value below which `share` of `values` lie (reorders them).
+fn percentile(values: &mut [u8], share: f64) -> u8 {
+    if values.is_empty() {
+        return 0;
+    }
+    let k = ((values.len() - 1) as f64 * share) as usize;
+    *values.select_nth_unstable(k).1
 }
 
 /// Share of ink in the square window of half side `radius` around a pixel,
@@ -218,9 +261,9 @@ fn dilate(mask: &[bool], w: usize, h: usize, radius: usize) -> Vec<bool> {
 }
 
 /// Averages `factor`² blocks over the pixels outside `hole` (with
-/// `darker_half`, over the darker half of them); blocks that are all hole
+/// `darkest`, over the darkest quarter of them); blocks that are all hole
 /// take the mean of their filled neighbors.
-fn fill_downsample(r: &Raster, hole: &[bool], factor: u32, darker_half: bool) -> Raster {
+fn fill_downsample(r: &Raster, hole: &[bool], factor: u32, darkest: bool) -> Raster {
     let (w, h, c) = (r.width as usize, r.height as usize, r.channels as usize);
     let f = factor.max(1) as usize;
     let (bw, bh) = (w.div_ceil(f), h.div_ceil(f));
@@ -239,10 +282,10 @@ fn fill_downsample(r: &Raster, hole: &[bool], factor: u32, darker_half: bool) ->
                     }
                 }
             }
-            if darker_half && members.len() > 1 {
-                let mid = members.len() / 2;
-                members.select_nth_unstable(mid);
-                members.truncate(mid);
+            if darkest && members.len() > 3 {
+                let quarter = members.len() / 4;
+                members.select_nth_unstable(quarter);
+                members.truncate(quarter);
             }
             let b = by * bw + bx;
             count[b] = members.len() as u32;

@@ -232,7 +232,7 @@ fn sharp_text_modes_paint_ink_through_a_full_resolution_jbig2_mask() {
         let mask = doc.get_object(ink.dict.get(b"Mask").unwrap().as_reference().unwrap()).unwrap().as_stream().unwrap();
         assert_eq!(mask.dict.get(b"ImageMask").unwrap(), &Object::Boolean(true));
         assert_eq!(mask.dict.get(b"Filter").unwrap().as_name().unwrap(), b"JBIG2Decode");
-        assert_eq!(mask.dict.get(b"Width").unwrap().as_i64().unwrap(), 1275, "text keeps the scan's resolution");
+        assert_eq!(mask.dict.get(b"Width").unwrap().as_i64().unwrap(), 2550, "a 150 DPI scan gets a 300 DPI mask");
         let background = images.iter().find(|i| !i.dict.has(b"Mask")).unwrap();
         assert_eq!(background.dict.get(b"Width").unwrap().as_i64().unwrap(), 1020, "the level's resolution: 8.5 in at 120 DPI");
         let space = if channels == 1 { &b"DeviceGray"[..] } else { b"DeviceRGB" };

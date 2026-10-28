@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize};
 /// Resolution for OCR and for rasterizing vector pages.
 pub const WORK_PPI: f64 = 300.0;
 
+/// JPEG quality of the ink color layer: it is tiny, and artifacts would
+/// show as blotchy letters.
+const INK_JPEG_QUALITY: u8 = 85;
+
 /// Largest page render (an A3 page at 500 DPI).
 const MAX_RENDER_PIXELS: f64 = 50e6;
 
@@ -356,10 +360,19 @@ pub fn run_page_job(job: &PageJob, rendered: Option<Raster>) -> Result<PageOutpu
     if layers {
         let f = (job.settings.background_dpi(color) / work_ppi).min(1.0);
         let size = (((raster.width as f64 * f).round() as u32).max(1), ((raster.height as f64 * f).round() as u32).max(1));
-        let split = crate::mrc::separate(&raster, scale, size)?;
+        // A bilevel mask below WORK_PPI has staircase edges, and its
+        // threshold takes the soft edge pixels for ink: draw it from the
+        // page enlarged to WORK_PPI.
+        let split = if work_ppi < 0.9 * WORK_PPI {
+            let k = WORK_PPI / work_ppi;
+            let up = raster.resize((raster.width as f64 * k).round() as u32, (raster.height as f64 * k).round() as u32)?;
+            crate::mrc::separate(&up, 1.0, size)?
+        } else {
+            crate::mrc::separate(&raster, scale, size)?
+        };
         let quality = job.settings.jpeg_quality().or(job.source_quality).unwrap_or(75);
         let background = encode::encode_jpeg(&split.background, quality)?;
-        let mask = MaskLayer { mask: encode::encode_jbig2(&split.mask)?, foreground: encode::encode_jpeg(&split.foreground, quality)?, ctm: image_ctm };
+        let mask = MaskLayer { mask: encode::encode_jbig2(&split.mask)?, foreground: encode::encode_jpeg(&split.foreground, INK_JPEG_QUALITY)?, ctm: image_ctm };
         let mut output = out(ImageOut::Encoded(background), image_ctm, ocr, route);
         output.mask = Some(mask);
         return Ok(output);
