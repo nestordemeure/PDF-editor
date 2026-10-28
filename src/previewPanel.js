@@ -16,15 +16,13 @@ const MAX_RENDER_PIXELS = 20e6;
 const CACHE_PIXELS = 40e6;
 const MAX_ZOOM = 8;
 const WHEEL_STEP = 1.25;
-// Pointer travel (CSS pixels) that makes a press a drag, not a click.
-const DRAG_THRESHOLD = 4;
 
 /**
  * Wires the panel. `getRecord(page)` gives a page's source record,
  * `getPageNumber(page)` its position, `getCompression()` the save's level.
  * Returns { show(page), redraw() }.
  */
-export function createPreviewPanel({ box, stage, canvas, label, fitButton, getRecord, getPageNumber, getCompression, openPdf }) {
+export function createPreviewPanel({ box, stage, canvas, label, getRecord, getPageNumber, getCompression, openPdf }) {
   let page = null;
   // { cx, cy, z } when zoomed: the view center in page fractions, and
   // screen pixels per full-scale pixel.
@@ -106,16 +104,12 @@ export function createPreviewPanel({ box, stage, canvas, label, fitButton, getRe
     return { width: page.thumbnail.width * ptsPerPixel, height: page.thumbnail.height * ptsPerPixel };
   }
 
-  /**
-   * Sizes the canvas to the page's shape, within the panel and the window.
-   * Zoomed, it keeps that height and takes the panel's width.
-   */
+  /** Sizes the canvas: the panel's width, and the height of the fitted page within the window. */
   function layout(aspect) {
     const chrome = box.offsetHeight - stage.offsetHeight;
     const maxHeight = Math.max(200, window.innerHeight - 32 - chrome);
-    const fitWidth = Math.min(stage.clientWidth, maxHeight / aspect);
-    const cssWidth = zoom ? stage.clientWidth : fitWidth;
-    const cssHeight = fitWidth * aspect;
+    const cssWidth = stage.clientWidth;
+    const cssHeight = Math.min(cssWidth, maxHeight / aspect) * aspect;
     canvas.style.width = `${cssWidth}px`;
     canvas.style.height = `${cssHeight}px`;
     const dpr = window.devicePixelRatio || 1;
@@ -123,8 +117,16 @@ export function createPreviewPanel({ box, stage, canvas, label, fitButton, getRe
     canvas.height = Math.max(1, Math.round(cssHeight * dpr));
   }
 
+  /** Page size in full-scale pixels. */
+  function pagePixels(full) {
+    const size = pageSizePts(full);
+    return { width: size.width * FULL_SCALE_DPI / 72, height: size.height * FULL_SCALE_DPI / 72 };
+  }
+
+  /** The zoom that shows the whole page. */
+  const fitZoom = pixels => Math.min(canvas.width / pixels.width, canvas.height / pixels.height);
+
   function draw() {
-    fitButton.hidden = !zoom;
     canvas.classList.toggle("is-zoomed", Boolean(zoom));
     if (!page) {
       canvas.width = 0;
@@ -147,25 +149,28 @@ export function createPreviewPanel({ box, stage, canvas, label, fitButton, getRe
       cache.delete(key);
       cache.set(key, full);
     }
-    const size = pageSizePts(full);
-    layout(size.height / size.width);
+    const pixels = pagePixels(full);
+    layout(pixels.height / pixels.width);
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.imageSmoothingQuality = "high";
+    const fit = fitZoom(pixels);
 
+    // Zoomed all the way out is the fitted page.
+    if (zoom && zoom.z <= fit * 1.001) zoom = null;
     if (!zoom) {
+      canvas.classList.remove("is-zoomed");
+      const width = pixels.width * fit;
+      const height = pixels.height * fit;
       ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(page.thumbnail, 0, 0, canvas.width, canvas.height);
-      label.textContent = `${number} · click to zoom to full scale`;
+      ctx.drawImage(page.thumbnail, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+      label.textContent = `${number} · scroll to zoom`;
       return;
     }
 
-    // Page size in full-scale pixels, then on screen
-    const pageWidth = size.width * FULL_SCALE_DPI / 72;
-    const pageHeight = size.height * FULL_SCALE_DPI / 72;
-    zoom.z = Math.min(MAX_ZOOM, Math.max(zoom.z, canvas.width / pageWidth));
-    const shownWidth = pageWidth * zoom.z;
-    const shownHeight = pageHeight * zoom.z;
+    zoom.z = Math.min(MAX_ZOOM, zoom.z);
+    const shownWidth = pixels.width * zoom.z;
+    const shownHeight = pixels.height * zoom.z;
     zoom.cx = clampCenter(zoom.cx, canvas.width / shownWidth);
     zoom.cy = clampCenter(zoom.cy, canvas.height / shownHeight);
     const x = canvas.width / 2 - zoom.cx * shownWidth;
@@ -175,12 +180,11 @@ export function createPreviewPanel({ box, stage, canvas, label, fitButton, getRe
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     // Enlarged full-scale pixels stay sharp; the thumbnail stands in blurred.
     ctx.imageSmoothingEnabled = !full || zoom.z < 1;
-    ctx.imageSmoothingQuality = "high";
     ctx.drawImage(full ? full.canvas : page.thumbnail, x, y, shownWidth, shownHeight);
 
     const percent = `${Math.round(zoom.z * 100)}%`;
     if (full) {
-      label.textContent = `${number} · ${percent} · drag to move, scroll to zoom, Esc to fit`;
+      label.textContent = `${number} · ${percent} · drag to move, scroll to zoom`;
     } else if (failed && failed.key === key) {
       label.textContent = `${number} · full-scale render failed: ${failed.message}`;
     } else {
@@ -195,75 +199,56 @@ export function createPreviewPanel({ box, stage, canvas, label, fitButton, getRe
     return Math.min(1 - viewFraction / 2, Math.max(viewFraction / 2, center));
   }
 
-  /** The page point (fractions) under a pointer event, and its offset from the canvas center in canvas pixels. */
-  function pointAt(event) {
-    const rect = canvas.getBoundingClientRect();
-    const dx = (event.clientX - rect.left) / rect.width * canvas.width - canvas.width / 2;
-    const dy = (event.clientY - rect.top) / rect.height * canvas.height - canvas.height / 2;
-    if (!zoom) return { fx: 0.5 + dx / canvas.width, fy: 0.5 + dy / canvas.height, dx, dy };
-    const { width, height } = shownSize();
-    return { fx: zoom.cx + dx / width, fy: zoom.cy + dy / height, dx, dy };
-  }
-
   /** Size of the zoomed page on the canvas. */
   function shownSize() {
-    const full = cache.get(keyOf(page, getRecord(page)));
-    const size = pageSizePts(full);
-    return { width: size.width * FULL_SCALE_DPI / 72 * zoom.z, height: size.height * FULL_SCALE_DPI / 72 * zoom.z };
-  }
-
-  function exitZoom() {
-    zoom = null;
-    draw();
+    const pixels = pagePixels(cache.get(keyOf(page, getRecord(page))));
+    return { width: pixels.width * zoom.z, height: pixels.height * zoom.z };
   }
 
   let drag = null;
   canvas.addEventListener("pointerdown", event => {
-    if (!page || !page.thumbnail || event.button !== 0) return;
+    if (!zoom || event.button !== 0) return;
     canvas.setPointerCapture(event.pointerId);
-    drag = { x: event.clientX, y: event.clientY, moved: false, start: zoom && { ...zoom } };
+    canvas.classList.add("is-dragging");
+    drag = { x: event.clientX, y: event.clientY, start: { ...zoom } };
   });
   canvas.addEventListener("pointermove", event => {
-    if (!drag) return;
-    if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > DRAG_THRESHOLD) drag.moved = true;
-    if (!drag.moved || !zoom) return;
-    canvas.classList.add("is-dragging");
+    if (!drag || !zoom) return;
     const rect = canvas.getBoundingClientRect();
     const { width, height } = shownSize();
     zoom.cx = drag.start.cx - (event.clientX - drag.x) / rect.width * canvas.width / width;
     zoom.cy = drag.start.cy - (event.clientY - drag.y) / rect.height * canvas.height / height;
     draw();
   });
-  const endDrag = event => {
-    if (!drag) return;
-    const click = !drag.moved;
+  const endDrag = () => {
     drag = null;
     canvas.classList.remove("is-dragging");
-    if (click && !zoom && event.type === "pointerup") {
-      const { fx, fy } = pointAt(event);
-      zoom = { cx: fx, cy: fy, z: 1 };
-      draw();
-    }
   };
   canvas.addEventListener("pointerup", endDrag);
   canvas.addEventListener("pointercancel", endDrag);
-  canvas.addEventListener("dblclick", () => {
-    if (zoom) exitZoom();
-  });
   canvas.addEventListener("wheel", event => {
-    if (!zoom || !page || !page.thumbnail) return;
+    if (!page || !page.thumbnail) return;
     event.preventDefault();
-    const { fx, fy, dx, dy } = pointAt(event);
+    // Zooming starts from the fitted page.
+    if (!zoom) zoom = { cx: 0.5, cy: 0.5, z: fitZoom(pagePixels(null)) };
+    const rect = canvas.getBoundingClientRect();
+    const dx = (event.clientX - rect.left) / rect.width * canvas.width - canvas.width / 2;
+    const dy = (event.clientY - rect.top) / rect.height * canvas.height - canvas.height / 2;
+    let { width, height } = shownSize();
+    const fx = zoom.cx + dx / width;
+    const fy = zoom.cy + dy / height;
     zoom.z = Math.min(MAX_ZOOM, zoom.z * (event.deltaY < 0 ? WHEEL_STEP : 1 / WHEEL_STEP));
     // Keep the point under the pointer in place
-    const { width, height } = shownSize();
+    ({ width, height } = shownSize());
     zoom.cx = fx - dx / width;
     zoom.cy = fy - dy / height;
     draw();
   }, { passive: false });
-  fitButton.addEventListener("click", exitZoom);
   document.addEventListener("keydown", event => {
-    if (event.key === "Escape" && zoom && !document.querySelector("dialog[open]")) exitZoom();
+    if (event.key === "Escape" && zoom && !document.querySelector("dialog[open]")) {
+      zoom = null;
+      draw();
+    }
   });
   new ResizeObserver(() => draw()).observe(stage);
 

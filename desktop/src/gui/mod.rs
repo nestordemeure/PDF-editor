@@ -14,10 +14,13 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use thumbnails::{FULL_SCALE_DPI, Thumbnails};
 
+/// Smallest card width: cards stretch to fill each row.
 const CARD_WIDTH: f32 = 150.0;
+const CARD_GAP: f32 = 10.0;
 const CARD_HEIGHT: f32 = 242.0;
 const THUMB_HEIGHT: f32 = 210.0;
 const MAX_ZOOM: f32 = 8.0;
+const FULL_UV: Rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
 /// Zoom factor per mouse wheel notch.
 const WHEEL_STEP: f32 = 1.25;
 
@@ -49,10 +52,10 @@ pub struct App {
     dragging: Option<usize>,
     last_dir: Option<PathBuf>,
     close_after_job: bool,
-    /// Frames left to ask for a maximized window. eframe shows the window
-    /// after its first frame, and window managers ignore the maximized hint
-    /// of a hidden window.
-    maximize_tries: u32,
+    /// Startup frames left. eframe shows the window after its first frame,
+    /// and window managers ignore the maximized hint of a hidden window: ask
+    /// again until it is maximized, then repaint the enlarged window.
+    startup_frames: u32,
     /// Save plan summary for (document revision, compression).
     plan: Option<((u64, Compression), String)>,
 }
@@ -84,7 +87,7 @@ impl App {
             dragging: None,
             last_dir: None,
             close_after_job: false,
-            maximize_tries: 30,
+            startup_frames: 40,
             plan: None,
         };
         if !files.is_empty() {
@@ -363,16 +366,10 @@ impl App {
     }
 
     fn preview_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("Preview");
-            if self.zoom.is_some() {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Fit page").on_hover_text("Esc").clicked() {
-                        self.zoom = None;
-                    }
-                });
-            }
-        });
+        // egui keeps a side panel as wide as its content: fill it, else a
+        // resize snaps back.
+        ui.set_min_width(ui.available_width());
+        ui.heading("Preview");
         let Some(entry) = self.preview.and_then(|id| self.doc.pages.iter().position(|e| e.id == id)) else {
             ui.label("Click a page to preview it.");
             return;
@@ -385,10 +382,10 @@ impl App {
         let number = format!("Page #{}", entry + 1);
         let failed = self.zoom.and(self.thumbs.full_scale_error(&page, self.compression));
         let label = match (self.zoom, &full, failed) {
-            (None, _, _) => format!("{number} · click to zoom to full scale"),
+            (None, _, _) => format!("{number} · scroll to zoom"),
             (Some(_), None, Some(e)) => format!("{number} · full-scale render failed: {e}"),
             (Some(zoom), None, None) => format!("{number} · {:.0}% · rendering at full scale...", zoom.z * 100.0),
-            (Some(zoom), Some(_), _) => format!("{number} · {:.0}% · drag to move, scroll to zoom, Esc to fit", zoom.z * 100.0),
+            (Some(zoom), Some(_), _) => format!("{number} · {:.0}% · drag to move, scroll to zoom", zoom.z * 100.0),
         };
         ui.label(label);
 
@@ -397,37 +394,19 @@ impl App {
         // Width buckets avoid re-rendering on every resize step.
         let width_px = ((fit_width * ppp / 200.0).ceil() * 200.0).clamp(200.0, 2400.0) as u32;
         let fitted = self.thumbs.get(&self.doc.sources, &page, width_px).or_else(|| self.thumbs.any_for(&page));
-        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-
-        let Some(mut zoom) = self.zoom else {
-            let (rect, response) = ui.allocate_exact_size(Vec2::new(fit_width, fit_width * aspect), Sense::click());
-            match &fitted {
-                Some(t) => {
-                    ui.painter().image(t.id(), rect, uv, Color32::WHITE);
-                    if response.clicked()
-                        && let Some(pos) = response.interact_pointer_pos() {
-                            self.zoom = Some(Zoom { cx: (pos.x - rect.min.x) / rect.width(), cy: (pos.y - rect.min.y) / rect.height(), z: 1.0 });
-                        }
-                    response.on_hover_cursor(egui::CursorIcon::ZoomIn);
-                }
-                None => match self.thumbs.error(&page, width_px) {
-                    Some(e) => {
-                        ui.colored_label(Color32::RED, e);
-                    }
-                    None => {
-                        ui.put(rect, egui::Spinner::new());
-                    }
-                },
-            }
+        let Some(fitted) = fitted else {
+            match self.thumbs.error(&page, width_px) {
+                Some(e) => ui.colored_label(Color32::RED, e),
+                None => ui.spinner(),
+            };
             return;
         };
-
-        // Zoomed: the fitted height, the panel's width.
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(avail.x, fit_width * aspect), Sense::click_and_drag());
-        // Page size in full-scale pixels
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(avail.x, fit_width * aspect), Sense::drag());
+        // Page size in full-scale pixels; zoom 1 shows one per screen pixel.
         let page_px = Vec2::new(page_w as f32, page_h as f32) * (FULL_SCALE_DPI / 72.0) as f32;
-        let min_zoom = rect.width() * ppp / page_px.x;
+        let fit_zoom = (rect.width() / page_px.x).min(rect.height() / page_px.y) * ppp;
         let shown = |z: f32| page_px * z / ppp;
+        let mut zoom = self.zoom.unwrap_or(Zoom { cx: 0.5, cy: 0.5, z: fit_zoom });
         if let Some(pointer) = response.hover_pos() {
             let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
             let factor: f32 = WHEEL_STEP.powf(scroll / 50.0) * pinch;
@@ -436,13 +415,18 @@ impl App {
                 let offset = pointer - rect.center();
                 let before = shown(zoom.z);
                 let (fx, fy) = (zoom.cx + offset.x / before.x, zoom.cy + offset.y / before.y);
-                zoom.z = (zoom.z * factor).clamp(min_zoom, MAX_ZOOM);
+                zoom.z = (zoom.z * factor).min(MAX_ZOOM);
                 let after = shown(zoom.z);
                 zoom.cx = fx - offset.x / after.x;
                 zoom.cy = fy - offset.y / after.y;
             }
         }
-        zoom.z = zoom.z.clamp(min_zoom, MAX_ZOOM);
+        // Zoomed all the way out is the fitted page.
+        if zoom.z <= fit_zoom * 1.001 {
+            self.zoom = None;
+            ui.painter().image(fitted.id(), Rect::from_center_size(rect.center(), shown(fit_zoom)), FULL_UV, Color32::WHITE);
+            return;
+        }
         let size = shown(zoom.z);
         if response.dragged() {
             let delta = response.drag_delta();
@@ -457,12 +441,9 @@ impl App {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, CornerRadius::ZERO, ui.visuals().extreme_bg_color);
         // The fitted image stands in, blurred, until the full-scale one is ready.
-        if let Some(t) = full.as_ref().or(fitted.as_ref()) {
-            painter.image(t.id(), page_rect, uv, Color32::WHITE);
-        }
-        let cursor = if response.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
-        self.zoom = if response.double_clicked() { None } else { Some(zoom) };
-        response.on_hover_cursor(cursor);
+        painter.image(full.as_ref().unwrap_or(&fitted).id(), page_rect, FULL_UV, Color32::WHITE);
+        self.zoom = Some(zoom);
+        response.on_hover_cursor(if ui.input(|i| i.pointer.primary_down()) { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
     }
 
     fn page_grid(&mut self, ui: &mut egui::Ui) {
@@ -478,7 +459,6 @@ impl App {
         });
         ui.separator();
         let ppp = ui.ctx().pixels_per_point();
-        let thumb_px = if ppp > 1.5 { 320 } else { 240 };
         let pointer = ui.ctx().pointer_interact_pos();
         let mut rects: Vec<Rect> = Vec::with_capacity(self.doc.pages.len());
         let mut clicked: Option<(u64, bool)> = None;
@@ -487,11 +467,18 @@ impl App {
         let busy = self.jobs.busy();
 
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            // Cards stretch so each row fills the width, up to the preview panel.
+            let width = ui.available_width();
+            let columns = ((width + CARD_GAP) / (CARD_WIDTH + CARD_GAP)).floor().max(1.0);
+            let card_w = ((width - (columns - 1.0) * CARD_GAP) / columns - 0.01).floor().max(CARD_WIDTH);
+            let thumb_h = THUMB_HEIGHT * card_w / CARD_WIDTH;
+            let card_h = thumb_h + CARD_HEIGHT - THUMB_HEIGHT;
+            let thumb_px = if card_w * ppp > 240.0 { 320 } else { 240 };
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::splat(10.0);
+                ui.spacing_mut().item_spacing = Vec2::splat(CARD_GAP);
                 for i in 0..self.doc.pages.len() {
                     let entry = self.doc.pages[i].clone();
-                    let (rect, _) = ui.allocate_exact_size(Vec2::new(CARD_WIDTH, CARD_HEIGHT), Sense::hover());
+                    let (rect, _) = ui.allocate_exact_size(Vec2::new(card_w, card_h), Sense::hover());
                     rects.push(rect);
                     let resp = ui.interact(rect, Id::new(("card", entry.id)), Sense::click_and_drag());
                     if resp.clicked() {
@@ -518,7 +505,7 @@ impl App {
                         Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color)
                     };
                     painter.rect(rect, CornerRadius::same(6), fill, stroke, StrokeKind::Inside);
-                    let thumb_area = Rect::from_min_size(rect.min + Vec2::new(5.0, 5.0), Vec2::new(CARD_WIDTH - 10.0, THUMB_HEIGHT - 10.0));
+                    let thumb_area = Rect::from_min_size(rect.min + Vec2::new(5.0, 5.0), Vec2::new(card_w - 10.0, thumb_h - 10.0));
                     let texture = self.thumbs.get(&self.doc.sources, &entry.page, thumb_px).or_else(|| self.thumbs.any_for(&entry.page));
                     match texture {
                         Some(t) => {
@@ -684,14 +671,14 @@ fn drop_target(rects: &[Rect], pos: Pos2) -> Option<usize> {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if self.maximize_tries > 0 {
+        if self.startup_frames > 0 {
+            self.startup_frames -= 1;
             if ctx.input(|i| i.viewport().maximized) == Some(true) {
-                self.maximize_tries = 0;
+                self.startup_frames = self.startup_frames.min(10);
             } else {
-                self.maximize_tries -= 1;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
-                ctx.request_repaint_after(std::time::Duration::from_millis(50));
             }
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         self.thumbs.poll();
         self.handle_events();

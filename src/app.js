@@ -442,7 +442,6 @@ const preview = createPreviewPanel({
   stage: document.getElementById("previewStage"),
   canvas: document.getElementById("previewCanvas"),
   label: document.getElementById("previewLabel"),
-  fitButton: document.getElementById("previewFitBtn"),
   getRecord: getRecordForPage,
   getPageNumber: page => pages.findIndex(p => p.id === page.id) + 1,
   getCompression: () => compressionLevel.value,
