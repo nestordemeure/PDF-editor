@@ -11,9 +11,47 @@ body {
 /* Three Column Layout */
 .three-column-layout {
   display: grid;
-  grid-template-columns: 200px 1fr 320px;
-  gap: 1rem;
+  /* Operations, gutter, pages, resizer, preview */
+  grid-template-columns: 200px 1rem minmax(0, 1fr) 1rem var(--preview-width, 360px);
+  row-gap: 1rem;
   align-items: start;
+}
+
+.operations-sidebar {
+  grid-column: 1;
+}
+
+.pages-main {
+  grid-column: 3;
+}
+
+.preview-resizer {
+  grid-column: 4;
+  align-self: stretch;
+  cursor: col-resize;
+  touch-action: none;
+  position: relative;
+}
+
+.preview-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(50% - 1px);
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.preview-resizer:hover::after,
+.preview-resizer.is-active::after {
+  background: var(--accent);
+}
+
+.preview-sidebar {
+  grid-column: 5;
 }
 
 /* Left Sidebar - Operations */
@@ -52,6 +90,16 @@ body {
 @media screen and (max-width: 1024px) {
   .three-column-layout {
     grid-template-columns: 1fr;
+  }
+
+  .operations-sidebar,
+  .pages-main,
+  .preview-sidebar {
+    grid-column: 1;
+  }
+
+  .preview-resizer {
+    display: none;
   }
 
   .operations-sidebar,
@@ -153,12 +201,34 @@ body {
   line-height: 1.35;
 }
 
+.preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-height: 2rem;
+  margin-bottom: 0.75rem;
+}
+
+.preview-stage {
+  display: flex;
+  justify-content: center;
+}
+
 .preview-canvas {
-  width: 100%;
-  height: auto;
+  display: block;
   border-radius: 6px;
   border: 1px solid #e2dcd3;
   background: #fafafa;
+  cursor: zoom-in;
+  touch-action: none;
+}
+
+.preview-canvas.is-zoomed {
+  cursor: grab;
+}
+
+.preview-canvas.is-dragging {
+  cursor: grabbing;
 }
 
 /* Center text in dropdown menus */
@@ -170,4 +240,9 @@ body {
 /* Keep the dropdown arrow always visible, not just on hover */
 .select:not(.is-multiple):not(.is-loading)::after {
   border-color: var(--ink);
+}
+
+/* Bulma's display rules override the hidden attribute */
+.preview-header [hidden] {
+  display: none;
 }

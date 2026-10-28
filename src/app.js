@@ -14,6 +14,7 @@ import { getBasePageCanvas, updatePageThumbnail, applyOperationsToCanvas, clearB
 import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection, forEachConcurrent, THUMBNAIL_CONCURRENCY } from "./pageCommands.js";
 import { savePdf } from "./saveManager.js";
 import { library } from "./engine.js";
+import { createPreviewPanel, initPreviewResizer } from "./previewPanel.js";
 
 // DOM Elements
 const fileInput = document.getElementById("fileInput");
@@ -32,8 +33,6 @@ const pageCount = document.getElementById("pageCount");
 const progressBar = document.getElementById("progressBar");
 const statusText = document.getElementById("status");
 const compressionLevel = document.getElementById("compressionLevel");
-const previewCanvas = document.getElementById("previewCanvas");
-const previewLabel = document.getElementById("previewLabel");
 const ocrLang = document.getElementById("ocrLang");
 
 // PDF.js renders thumbnails and the pages the engine cannot decode itself
@@ -438,31 +437,36 @@ sortable = new Sortable(pageGrid, {
   },
 });
 
+const preview = createPreviewPanel({
+  box: document.getElementById("previewBox"),
+  stage: document.getElementById("previewStage"),
+  canvas: document.getElementById("previewCanvas"),
+  label: document.getElementById("previewLabel"),
+  fitButton: document.getElementById("previewFitBtn"),
+  getRecord: getRecordForPage,
+  getPageNumber: page => pages.findIndex(p => p.id === page.id) + 1,
+  getCompression: () => compressionLevel.value,
+  openPdf,
+});
+
+initPreviewResizer({
+  layout: document.querySelector(".three-column-layout"),
+  resizer: document.getElementById("previewResizer"),
+  pagesBox: document.querySelector(".pages-main > .box"),
+  pageGrid,
+});
+
 function setPreview(page) {
   activePreviewId = page.id;
-  const ctx = previewCanvas.getContext("2d");
-  if (page.thumbnail) {
-    previewCanvas.width = page.thumbnail.width;
-    previewCanvas.height = page.thumbnail.height;
-    ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
-    ctx.drawImage(page.thumbnail, 0, 0);
-  } else {
-    previewCanvas.width = 100;
-    previewCanvas.height = 140;
-    ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
-  }
-  previewLabel.textContent = `Previewing page #${pages.findIndex(p => p.id === page.id) + 1}`;
+  preview.show(page);
 }
 
 function updatePreviewAfterRender() {
   if (!pages.length) {
-    previewCanvas.width = 0;
-    previewCanvas.height = 0;
-    previewLabel.textContent = "Click a page to preview it.";
+    preview.show(null);
     return;
   }
-  const page = pages.find(p => p.id === activePreviewId) || pages[0];
-  setPreview(page);
+  setPreview(pages.find(p => p.id === activePreviewId) || pages[0]);
 }
 
 // ============================================
@@ -822,6 +826,9 @@ saveBtn.addEventListener("click", () => runExclusive(async () => {
     saveBtn.disabled = false;
   }
 }));
+
+// The full-scale preview shows the page as this level saves it
+compressionLevel.addEventListener("change", () => preview.redraw());
 
 // Initial status
 setStatus("Load a PDF to begin.");

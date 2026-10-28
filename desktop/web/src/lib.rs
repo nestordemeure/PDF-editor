@@ -2,7 +2,7 @@
 //! source documents and writes the output; page and image jobs run in other
 //! workers through the free functions, which need no source.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use pdf_editor::assemble::{Assembler, ImageTask};
 use pdf_editor::geometry::Matrix;
 use pdf_editor::model::{ColorMode, Compression, Page, PageKind, Side, View};
@@ -271,13 +271,8 @@ impl Library {
     /// Starts a save of `pages` (the web page model).
     pub fn begin_save(&mut self, pages: JsValue, level: String, ocr: bool) -> JsResult<JsValue> {
         let web: Vec<WebPage> = from_js(pages)?;
-        let pages = web.into_iter().map(to_page).collect::<Result<Vec<_>>>().map_err(js_error)?;
+        let pages = web.into_iter().map(|p| self.checked_page(p)).collect::<Result<Vec<_>>>().map_err(js_error)?;
         let sources = self.sources.clone();
-        for p in &pages {
-            if sources.get(p.source).is_none_or(|s| p.index >= s.pages.len()) {
-                return Err(js_error(anyhow!("page {} of source {} does not exist", p.index + 1, p.source)));
-            }
-        }
         let settings = Settings { compression: compression(&level).map_err(js_error)?, ocr, max_dpi: None, jpeg_quality: None };
         let out = Sink::default();
         let doc = Assembler::new(sources, pages, ocr, Box::new(out.clone())).map_err(js_error)?;
@@ -354,9 +349,58 @@ impl Library {
     pub fn cancel_save(&mut self) {
         self.save = None;
     }
+
+    /// The job of `page` saved alone at `level`, for a full-scale preview;
+    /// null when the page is copied as it is. Independent of any save.
+    pub fn preview_job(&self, page: JsValue, level: String) -> JsResult<JsValue> {
+        let page = self.checked_page(from_js(page)?).map_err(js_error)?;
+        if page.is_preserved() {
+            return Ok(JsValue::NULL);
+        }
+        let settings = Settings { compression: compression(&level).map_err(js_error)?, ocr: false, max_dpi: None, jpeg_quality: None };
+        let source = &self.sources[page.source];
+        let job = pipeline::page_job(source, &page, settings).map_err(js_error)?;
+        let bytes = postcard::to_stdvec(&job).map_err(|e| JsError::new(&e.to_string()))?;
+        to_js(&JobMessage { job: bytes, render: job.render, source: page.source, index: page.index })
+    }
+
+    /// A PDF of `page` alone, as a save at `level` writes it: from `output`,
+    /// the result of its preview job, or copied when it has none.
+    pub fn preview_pdf(&self, page: JsValue, level: String, output: Option<Vec<u8>>) -> JsResult<Vec<u8>> {
+        let page = self.checked_page(from_js(page)?).map_err(js_error)?;
+        let level = compression(&level).map_err(js_error)?;
+        let out = Sink::default();
+        let mut doc = Assembler::new(self.sources.clone(), vec![page], false, Box::new(out.clone())).map_err(js_error)?;
+        match output {
+            Some(bytes) => {
+                let output: PageOutput = postcard::from_bytes(&bytes).map_err(|e| JsError::new(&e.to_string()))?;
+                doc.write_raster_page(0, output).map_err(js_error)?;
+            }
+            None => {
+                for task in doc.preserved_images() {
+                    let source = doc.sources()[task.source].clone();
+                    let Some(job) = pipeline::image_job(&source, task.id, level, task.shown_ppi).map_err(js_error)? else { continue };
+                    if let Some(encoded) = pipeline::run_image_job(&job).map_err(js_error)? {
+                        doc.replace_image(task, encoded).map_err(js_error)?;
+                    }
+                }
+                doc.write_preserved_pages(&mut || {}).map_err(js_error)?;
+            }
+        }
+        doc.finish().map_err(js_error)?;
+        Ok(std::mem::take(&mut *out.0.borrow_mut()))
+    }
 }
 
 impl Library {
+    fn checked_page(&self, web: WebPage) -> Result<Page> {
+        let page = to_page(web)?;
+        if self.sources.get(page.source).is_none_or(|s| page.index >= s.pages.len()) {
+            bail!("page {} of source {} does not exist", page.index + 1, page.source);
+        }
+        Ok(page)
+    }
+
     fn source_mut(&mut self, id: usize) -> Result<&mut Source> {
         if self.save.is_some() {
             bail!("a save is in progress");

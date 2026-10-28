@@ -108,6 +108,43 @@ export class Library {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * The job of `page` saved alone at `level`, for a full-scale preview;
+     * null when the page is copied as it is. Independent of any save.
+     * @param {any} page
+     * @param {string} level
+     * @returns {any}
+     */
+    preview_job(page, level) {
+        const ptr0 = passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.library_preview_job(this.__wbg_ptr, page, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * A PDF of `page` alone, as a save at `level` writes it: from `output`,
+     * the result of its preview job, or copied when it has none.
+     * @param {any} page
+     * @param {string} level
+     * @param {Uint8Array | null} [output]
+     * @returns {Uint8Array}
+     */
+    preview_pdf(page, level, output) {
+        const ptr0 = passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(output) ? 0 : passArray8ToWasm0(output, wasm.__wbindgen_malloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.library_preview_pdf(this.__wbg_ptr, page, ptr0, len0, ptr1, len1);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v3;
+    }
+    /**
      * Replaces image `k` of text pages with the result of its job.
      * @param {number} k
      * @param {Uint8Array} encoded

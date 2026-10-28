@@ -134,11 +134,18 @@
           </div>
         </main>
 
+        <div id="previewResizer" class="preview-resizer" title="Drag to resize the preview. Double-click to reset."></div>
+
         <!-- Right Column: Preview -->
         <aside class="preview-sidebar">
-          <div class="box">
-            <h2 class="title is-6">Preview</h2>
-            <canvas id="previewCanvas" class="preview-canvas"></canvas>
+          <div id="previewBox" class="box">
+            <div class="preview-header">
+              <h2 class="title is-6 mb-0">Preview</h2>
+              <button id="previewFitBtn" class="button is-small is-light" hidden>Fit page</button>
+            </div>
+            <div id="previewStage" class="preview-stage">
+              <canvas id="previewCanvas" class="preview-canvas"></canvas>
+            </div>
             <p id="previewLabel" class="is-size-7 has-text-grey mt-2">Click a page to preview it.</p>
           </div>
         </aside>

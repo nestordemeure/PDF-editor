@@ -8,7 +8,7 @@
 import { previewPage } from "./engine.js";
 
 // Default thumbnail width in pixels
-const THUMBNAIL_WIDTH = 300;
+export const THUMBNAIL_WIDTH = 300;
 
 // Base (original colors, no operations) page renders, cached as small JPEG
 // blobs so pixel-effect changes rebuild thumbnails without touching PDF.js.
