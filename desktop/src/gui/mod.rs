@@ -49,9 +49,10 @@ pub struct App {
     dragging: Option<usize>,
     last_dir: Option<PathBuf>,
     close_after_job: bool,
-    /// Some window managers ignore the maximized hint at creation: ask again
-    /// once the window shows.
-    maximize_pending: bool,
+    /// Frames left to ask for a maximized window. eframe shows the window
+    /// after its first frame, and window managers ignore the maximized hint
+    /// of a hidden window.
+    maximize_tries: u32,
     /// Save plan summary for (document revision, compression).
     plan: Option<((u64, Compression), String)>,
 }
@@ -83,7 +84,7 @@ impl App {
             dragging: None,
             last_dir: None,
             close_after_job: false,
-            maximize_pending: true,
+            maximize_tries: 30,
             plan: None,
         };
         if !files.is_empty() {
@@ -683,8 +684,14 @@ fn drop_target(rects: &[Rect], pos: Pos2) -> Option<usize> {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if std::mem::take(&mut self.maximize_pending) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        if self.maximize_tries > 0 {
+            if ctx.input(|i| i.viewport().maximized) == Some(true) {
+                self.maximize_tries = 0;
+            } else {
+                self.maximize_tries -= 1;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
         }
         self.thumbs.poll();
         self.handle_events();
