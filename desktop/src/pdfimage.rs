@@ -1,11 +1,12 @@
 //! Reading image XObjects: what they are, and decoding the ones whose
 //! encoding is fully understood.
 
+use serde::{Deserialize, Serialize};
 use crate::pixel::Raster;
 use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageCodec {
     Jpeg,
     /// JPEG inside Flate (`/Filter [/FlateDecode /DCTDecode]`).
@@ -18,7 +19,7 @@ pub enum ImageCodec {
 
 /// A decodable image: one of the codecs above, gray or RGB, no masks and
 /// no decode arrays. Anything else is rendered by MuPDF instead.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ImageInfo {
     pub width: u32,
     pub height: u32,
@@ -121,60 +122,127 @@ pub fn inspect_with(doc: &Document, id: ObjectId, allow_smask: bool) -> Result<O
     if matches!(codec, ImageCodec::Jpeg | ImageCodec::FlateJpeg) && dict.has(b"DecodeParms") {
         return Ok(None);
     }
+    if matches!(codec, ImageCodec::Flate8 | ImageCodec::Flate1) && flate_parms(doc, dict).is_none() {
+        return Ok(None);
+    }
     Ok(Some(ImageInfo { width: width as u32, height: height as u32, channels, codec, encoded_len: stream.content.len(), has_smask }))
 }
 
-/// The JPEG file inside a JPEG image stream.
-pub fn jpeg_data<'a>(stream: &'a Stream, info: &ImageInfo) -> Result<std::borrow::Cow<'a, [u8]>> {
-    match info.codec {
-        ImageCodec::Jpeg => Ok(std::borrow::Cow::Borrowed(&stream.content)),
-        ImageCodec::FlateJpeg => {
-            let mut out = Vec::new();
-            std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(&stream.content[..]), &mut out).context("Flate layer of a JPEG")?;
-            Ok(std::borrow::Cow::Owned(out))
+/// An image stream with what decoding it needs, independent of its
+/// document: it can move to another thread or WebAssembly instance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredImage {
+    pub info: ImageInfo,
+    /// The stream's encoded bytes.
+    pub content: Vec<u8>,
+    /// The content is Flate-compressed (8 or 1 bit images may be raw).
+    pub flate: bool,
+    /// Flate predictor parameters (`/DecodeParms`).
+    pub parms: Vec<(Vec<u8>, i64)>,
+}
+
+/// Copies an image that `inspect` accepted out of its document.
+pub fn extract(doc: &Document, id: ObjectId, info: &ImageInfo) -> Result<StoredImage> {
+    let stream = image_stream(doc, id)?;
+    let parms = match flate_parms(doc, &stream.dict) {
+        Some(Some(d)) => d.iter().map(|(k, v)| Ok((k.clone(), v.as_i64().with_context(|| format!("image {id:?} has a non-integer decode parameter"))?))).collect::<Result<_>>()?,
+        Some(None) => Vec::new(),
+        None => bail!("image {id:?} has unsupported decode parameters"),
+    };
+    let flate = matches!(info.codec, ImageCodec::Flate8 | ImageCodec::Flate1) && single_filter(doc, &stream.dict) == Some(Some(&b"FlateDecode"[..]));
+    Ok(StoredImage { info: *info, content: stream.content.clone(), flate, parms })
+}
+
+/// The `/DecodeParms` dictionary of a single-filter stream: `Some(None)`
+/// when there is none, `None` when it is not a dictionary of integers.
+fn flate_parms<'a>(doc: &'a Document, dict: &'a Dictionary) -> Option<Option<&'a Dictionary>> {
+    let parms = match dict.get_deref(b"DecodeParms", doc) {
+        Err(_) | Ok(Object::Null) => return Some(None),
+        Ok(Object::Dictionary(d)) => d,
+        Ok(Object::Array(a)) if a.len() == 1 => match doc.dereference(&a[0]).ok()?.1 {
+            Object::Null => return Some(None),
+            Object::Dictionary(d) => d,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    parms.iter().all(|(_, v)| v.as_i64().is_ok()).then_some(Some(parms))
+}
+
+impl StoredImage {
+    /// The JPEG file inside a JPEG image.
+    pub fn jpeg_data(&self) -> Result<std::borrow::Cow<'_, [u8]>> {
+        match self.info.codec {
+            ImageCodec::Jpeg => Ok(std::borrow::Cow::Borrowed(&self.content)),
+            ImageCodec::FlateJpeg => {
+                let mut out = Vec::new();
+                std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(&self.content[..]), &mut out).context("Flate layer of a JPEG")?;
+                Ok(std::borrow::Cow::Owned(out))
+            }
+            _ => bail!("not a JPEG image"),
         }
-        _ => bail!("not a JPEG image"),
+    }
+
+    /// Decodes the image, as gray when `gray` is set.
+    pub fn decode(&self, gray: bool) -> Result<Raster> {
+        let raster = self.decode_native()?;
+        Ok(if gray { raster.to_gray() } else { raster })
+    }
+
+    fn flate_content(&self) -> Result<Vec<u8>> {
+        if !self.flate {
+            return Ok(self.content.clone());
+        }
+        let mut dict = Dictionary::new();
+        dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        if !self.parms.is_empty() {
+            let mut parms = Dictionary::new();
+            for (k, v) in &self.parms {
+                parms.set(k.clone(), Object::Integer(*v));
+            }
+            dict.set("DecodeParms", Object::Dictionary(parms));
+        }
+        Ok(Stream::new(dict, self.content.clone()).decompressed_content()?)
+    }
+
+    fn decode_native(&self) -> Result<Raster> {
+        let info = &self.info;
+        let (w, h) = (info.width as usize, info.height as usize);
+        match info.codec {
+            ImageCodec::Jpeg | ImageCodec::FlateJpeg => {
+                let raster = crate::encode::decode_jpeg(&self.jpeg_data()?, info.channels)?;
+                if (raster.width, raster.height) != (info.width, info.height) {
+                    bail!("JPEG is {}x{}, its dictionary says {w}x{h}", raster.width, raster.height);
+                }
+                Ok(raster)
+            }
+            ImageCodec::Flate8 => {
+                let mut data = self.flate_content().context("image data")?;
+                let need = w * h * info.channels as usize;
+                if data.len() < need {
+                    bail!("image has {} bytes, needs {need}", data.len());
+                }
+                data.truncate(need);
+                Raster::new(info.width, info.height, info.channels, data)
+            }
+            ImageCodec::Flate1 => {
+                let packed = self.flate_content().context("image data")?;
+                let row = w.div_ceil(8);
+                if packed.len() < row * h {
+                    bail!("bilevel image has {} bytes, needs {}", packed.len(), row * h);
+                }
+                let mut data = Vec::with_capacity(w * h);
+                for y in 0..h {
+                    let line = &packed[y * row..(y + 1) * row];
+                    data.extend((0..w).map(|x| if line[x >> 3] & (0x80 >> (x & 7)) != 0 { 255 } else { 0 }));
+                }
+                Raster::new(info.width, info.height, 1, data)
+            }
+        }
     }
 }
 
 /// Decodes an image that `inspect` accepted, as gray when `gray` is set.
 pub fn decode(doc: &Document, id: ObjectId, info: &ImageInfo, gray: bool) -> Result<Raster> {
-    let raster = decode_native(doc, id, info)?;
-    Ok(if gray { raster.to_gray() } else { raster })
-}
-
-fn decode_native(doc: &Document, id: ObjectId, info: &ImageInfo) -> Result<Raster> {
-    let stream = image_stream(doc, id)?;
-    let (w, h) = (info.width as usize, info.height as usize);
-    match info.codec {
-        ImageCodec::Jpeg | ImageCodec::FlateJpeg => {
-            let raster = crate::encode::decode_jpeg(&jpeg_data(stream, info)?, info.channels)?;
-            if (raster.width, raster.height) != (info.width, info.height) {
-                bail!("JPEG {id:?} is {}x{}, its dictionary says {w}x{h}", raster.width, raster.height);
-            }
-            Ok(raster)
-        }
-        ImageCodec::Flate8 => {
-            let mut data = stream.decompressed_content().with_context(|| format!("image {id:?}"))?;
-            let need = w * h * info.channels as usize;
-            if data.len() < need {
-                bail!("image {id:?} has {} bytes, needs {need}", data.len());
-            }
-            data.truncate(need);
-            Raster::new(info.width, info.height, info.channels, data)
-        }
-        ImageCodec::Flate1 => {
-            let packed = stream.decompressed_content().with_context(|| format!("image {id:?}"))?;
-            let row = w.div_ceil(8);
-            if packed.len() < row * h {
-                bail!("bilevel image {id:?} has {} bytes, needs {}", packed.len(), row * h);
-            }
-            let mut data = Vec::with_capacity(w * h);
-            for y in 0..h {
-                let line = &packed[y * row..(y + 1) * row];
-                data.extend((0..w).map(|x| if line[x >> 3] & (0x80 >> (x & 7)) != 0 { 255 } else { 0 }));
-            }
-            Raster::new(info.width, info.height, 1, data)
-        }
-    }
+    extract(doc, id, info)?.decode(gray).with_context(|| format!("image {id:?}"))
 }

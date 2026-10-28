@@ -3,7 +3,9 @@
 //! A matrix `[a b c d e f]` maps `(x, y)` to `(a x + c y + e, b x + d y + f)`.
 //! `m.then(n)` applies `m` first, then `n` (the PDF product `m × n`).
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Matrix {
     pub a: f64,
     pub b: f64,
@@ -97,7 +99,7 @@ pub fn rotate_cw_quarters(width: f64, height: f64, quarter_turns: u32) -> Matrix
     m
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x0: f64,
     pub y0: f64,

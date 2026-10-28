@@ -6,7 +6,7 @@ use crate::geometry::{Matrix, Rect, rotate_cw_quarters};
 use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document, LoadOptions, Object, ObjectId, Stream};
 use std::collections::HashSet;
-use std::io::Write;
+#[cfg(feature = "native")]
 use std::path::{Path, PathBuf};
 
 /// Pages whose images cover less than this share of the page, and that
@@ -22,11 +22,13 @@ pub struct Source {
     /// File name without extension.
     pub name: String,
     /// The file MuPDF renders: the original, or a rewritten copy.
+    #[cfg(feature = "native")]
     pub render_path: PathBuf,
     pub doc: Document,
     pub pages: Vec<SourcePage>,
     pub was_encrypted: bool,
     /// Keeps the rewritten copy alive.
+    #[cfg(feature = "native")]
     _rewritten: Option<tempfile::TempPath>,
 }
 
@@ -75,29 +77,27 @@ impl SourcePage {
 }
 
 impl Source {
+    #[cfg(feature = "native")]
     pub fn open(path: &Path) -> Result<Source> {
         let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
-        // An empty password opens unprotected files and "owner-only"
-        // encrypted ones (the usual DRM case).
-        let doc = Document::load_mem_with_options(&bytes, LoadOptions::with_password(""))
-            .with_context(|| format!("cannot open {} (encrypted with a user password?)", path.display()))?;
-        let was_encrypted = doc.was_encrypted();
+        let (doc, was_encrypted) = load(&bytes).with_context(|| format!("cannot open {} (encrypted with a user password?)", path.display()))?;
         drop(bytes);
-
-        let mut source = Source {
-            name,
-            render_path: path.to_path_buf(),
-            doc,
-            pages: Vec::new(),
-            was_encrypted,
-            _rewritten: None,
-        };
+        let mut source = Source { name, render_path: path.to_path_buf(), doc, pages: Vec::new(), was_encrypted, _rewritten: None };
         source.pages = source.read_pages()?;
         if source.was_encrypted {
             // MuPDF must see exactly the decrypted objects we copy from.
             source.rewrite_render_copy()?;
         }
+        Ok(source)
+    }
+
+    /// Loads a PDF from memory. `name` is the file name without extension.
+    #[cfg(not(feature = "native"))]
+    pub fn from_bytes(name: String, bytes: &[u8]) -> Result<Source> {
+        let (doc, was_encrypted) = load(bytes).context("cannot open the file (encrypted with a user password?)")?;
+        let mut source = Source { name, doc, pages: Vec::new(), was_encrypted };
+        source.pages = source.read_pages()?;
         Ok(source)
     }
 
@@ -138,12 +138,20 @@ impl Source {
         Ok(pages)
     }
 
-    /// Writes the current object model to a temporary file and renders from it.
-    fn rewrite_render_copy(&mut self) -> Result<()> {
-        let mut file = tempfile::Builder::new().prefix("pdf-editor-").suffix(".pdf").tempfile()?;
+    /// The current object model as a PDF file, without encryption.
+    pub fn rewritten(&mut self) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
         self.doc.trailer.remove(b"Encrypt");
         self.doc.save_to(&mut buffer).context("cannot rewrite the source PDF")?;
+        Ok(buffer)
+    }
+
+    /// Writes the current object model to a temporary file and renders from it.
+    #[cfg(feature = "native")]
+    fn rewrite_render_copy(&mut self) -> Result<()> {
+        use std::io::Write;
+        let mut file = tempfile::Builder::new().prefix("pdf-editor-").suffix(".pdf").tempfile()?;
+        let buffer = self.rewritten()?;
         file.write_all(&buffer)?;
         let path = file.into_temp_path();
         self.render_path = path.to_path_buf();
@@ -186,6 +194,7 @@ impl Source {
                 }
             }
         }
+        #[cfg(feature = "native")]
         self.rewrite_render_copy()?;
         // Re-analyze: the stripped pages no longer have text.
         let kinds: Vec<bool> = self.pages.iter().map(|p| p.is_text_page).collect();
@@ -195,6 +204,14 @@ impl Source {
         }
         Ok(skipped)
     }
+}
+
+/// Opens a PDF with the empty password, which opens unprotected files and
+/// "owner-only" encrypted ones (the usual DRM case).
+fn load(bytes: &[u8]) -> Result<(Document, bool)> {
+    let doc = Document::load_mem_with_options(bytes, LoadOptions::with_password(""))?;
+    let was_encrypted = doc.was_encrypted();
+    Ok((doc, was_encrypted))
 }
 
 fn collect_forms(doc: &Document, resources: &Dictionary, seen: &mut HashSet<ObjectId>, out: &mut Vec<ObjectId>) {

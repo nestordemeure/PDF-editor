@@ -1,16 +1,18 @@
-//! Turns one page into an output image (and text layer). Runs on worker
-//! threads; owns no output state.
+//! Turns one page into an output image (and the input of its text layer).
+//!
+//! `page_job` reads what a raster page needs from its source; `run_page_job`
+//! does the work without the source, so it runs on any thread, or in another
+//! WebAssembly instance.
 
 use crate::encode::{self, EncodedImage, ImageFilter};
 use crate::geometry::{Matrix, Rect};
-use crate::model::{ColorMode, Compression, Page};
-use crate::ocr::{self, Engine};
-use crate::pdfimage::{self, ImageCodec, ImageInfo};
+use crate::model::{ColorMode, Compression, Page, PageKind, PixelOps};
+use crate::pdfimage::{self, ImageCodec, ImageInfo, StoredImage};
 use crate::pixel::{self, Raster};
-use crate::render;
 use crate::source::Source;
 use anyhow::{Context, Result, bail};
 use lopdf::ObjectId;
+use serde::{Deserialize, Serialize};
 
 /// Resolution for OCR and for rasterizing vector pages.
 pub const WORK_PPI: f64 = 300.0;
@@ -18,7 +20,7 @@ pub const WORK_PPI: f64 = 300.0;
 /// Largest page render (an A3 page at 500 DPI).
 const MAX_RENDER_PIXELS: f64 = 50e6;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PageRoute {
     /// Typeset page copied as PDF objects.
     Copied,
@@ -26,12 +28,13 @@ pub enum PageRoute {
     PassThrough,
     /// Original image decoded, processed and re-encoded.
     Reencoded,
-    /// Page rendered by MuPDF, processed and encoded.
+    /// Page rendered, processed and encoded.
     Rendered,
     /// Luma channel of the original JPEG, without re-encoding.
     ExactGray,
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum ImageOut {
     /// A new image derived from a source image without decoding it (exact
     /// grayscale), shared by every page that shows that image.
@@ -41,15 +44,28 @@ pub enum ImageOut {
     Encoded(EncodedImage),
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct PageOutput {
     /// Output page size in points.
     pub size: (f64, f64),
     pub image: ImageOut,
     /// Maps the image's unit square to output page space.
     pub image_ctm: Matrix,
-    /// Text layer operators, when OCR ran.
+    /// What OCR reads, when the save has OCR. The caller recognizes it and
+    /// sets `text`.
+    #[serde(skip)]
+    pub ocr: Option<OcrInput>,
+    /// Text layer operators.
     pub text: Option<Vec<u8>>,
     pub route: PageRoute,
+}
+
+/// An upright gray image for OCR, and where its pixels land on the page.
+pub struct OcrInput {
+    pub raster: Raster,
+    /// Maps pixels (y down) to output points (y up).
+    pub px_to_out: Matrix,
+    pub ppi: u32,
 }
 
 /// Pixel grid of an image and where it lands on the output page.
@@ -126,7 +142,7 @@ fn unit_ctm(width: u32, height: u32, px_to_out: Matrix) -> Matrix {
 }
 
 /// Settings shared by every page of a save.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub compression: Compression,
     pub ocr: bool,
@@ -164,7 +180,7 @@ struct Plan {
 
 fn plan(source: &Source, page: &Page, settings: Settings) -> Result<Plan> {
     let sp = &source.pages[page.index];
-    let embedded = if page.kind == crate::model::PageKind::Scan { sp.scan_image() } else { None };
+    let embedded = if page.kind == PageKind::Scan { sp.scan_image() } else { None };
     let info = match embedded {
         Some((id, _)) => pdfimage::inspect(&source.doc, id)?,
         None => None,
@@ -195,125 +211,44 @@ pub fn intended_route(source: &Source, page: &Page, settings: Settings) -> Resul
     Ok(plan(source, page, settings)?.route)
 }
 
-/// Processes a raster (not preserved) page.
-pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Option<&mut Engine>) -> Result<PageOutput> {
-    let sp = &source.pages[page.index];
-    let display = sp.display_size;
-    let to_out = page.view.display_to_output(display);
-    let out_size = page.view.output_size(display);
-    let Plan { embedded, info, ops_are_noop, route: planned } = plan(source, page, settings)?;
-
-    if let Some((id, unit_to_display)) = embedded {
-        let image_ctm = unit_to_display.then(to_out);
-        let ocr = |engine: Option<&mut Engine>| -> Result<Option<Vec<u8>>> {
-            match engine {
-                Some(e) => Ok(Some(ocr_layer(e, acquire(source, page, embedded, info, true)?.limit_ppi(WORK_PPI)?)?)),
-                None => Ok(None),
-            }
-        };
-        if planned == PageRoute::PassThrough {
-            let smaller = match info {
-                Some(info) => lossless_shrink(source, id, &info)?,
-                None => None,
-            };
-            let text = ocr(engine)?;
-            return Ok(PageOutput { size: out_size, image: ImageOut::PassThrough { id, smaller }, image_ctm, text, route: PageRoute::PassThrough });
-        }
-        // Grayscale without re-encoding: keep the JPEG's luma channel.
-        if let (PageRoute::ExactGray, Some(info)) = (planned, info)
-            && let Some(image) = exact_gray(source, id, &info)? {
-                let text = ocr(engine)?;
-                return Ok(PageOutput { size: out_size, image: ImageOut::Derived { id, image }, image_ctm, text, route: PageRoute::ExactGray });
-            }
-    }
-
-    let gray_only = page.color != ColorMode::Color;
-    let placed = acquire(source, page, embedded, info, gray_only)?;
-    let route = if info.is_some() { PageRoute::Reencoded } else { PageRoute::Rendered };
-    let ops = page.pixel_ops();
-    let target_ppi = settings.max_dpi(page.color);
-
-    // OCR reads the cleaned gray image at up to WORK_PPI; the output uses
-    // the level's resolution. When both are the same, clean up once.
-    let same = placed.ppi().min(WORK_PPI) == placed.ppi().min(target_ppi);
-    let ocr_placed = match (&engine, same) {
-        (Some(_), false) => Some(Placed { raster: placed.raster.clone(), ..placed }.limit_ppi(WORK_PPI)?),
-        _ => None,
-    };
-    let work = placed.limit_ppi(target_ppi)?;
-    let scale = work.ppi() / 300.0;
-    let cleaned = pixel::apply_cleanup(work.raster, ops, scale);
-    let text = match engine {
-        Some(engine) => {
-            let ocr_input = match ocr_placed {
-                Some(p) => {
-                    let s = p.ppi() / 300.0;
-                    Placed { raster: pixel::apply_cleanup(p.raster, ops, s).to_gray(), ..p }
-                }
-                None => Placed { raster: cleaned.to_gray(), px_to_out: work.px_to_out, ppi_factor: work.ppi_factor },
-            };
-            Some(ocr_layer(engine, ocr_input)?)
-        }
-        None => None,
-    };
-    let image_ctm = unit_ctm(cleaned.width, cleaned.height, work.px_to_out);
-    let raster = pixel::apply_color_mode(cleaned, page.color, scale);
-
-    let encoded = if page.color.is_bilevel() {
-        encode::encode_jbig2(&raster)?
-    } else {
-        let quality = match settings.jpeg_quality() {
-            Some(q) => Some(q),
-            // No compression: match the quality of the JPEG the page is
-            // made of, stay lossless otherwise.
-            None => {
-                let main = embedded.or_else(|| if page.kind == crate::model::PageKind::Scan { sp.main_image() } else { None });
-                match main {
-                    Some((id, _)) => source_jpeg_quality(source, id)?,
-                    None => None,
-                }
-            }
-        };
-        match quality {
-            Some(q) => encode::encode_jpeg(&raster, q)?,
-            None => encode::encode_flate_png(&raster),
-        }
-    };
-
-    // Recompressing an untouched scan must pay for itself.
-    if let (Some((id, unit_to_display)), Some(info)) = (embedded, info)
-        && ops_are_noop {
-            let share = (out_size.0 * out_size.1) / unit_to_display.then(to_out).det().abs().max(1e-9);
-            if encoded.data.len() as f64 >= info.encoded_len as f64 * share.min(1.0) {
-                let smaller = lossless_shrink(source, id, &info)?;
-                return Ok(PageOutput {
-                    size: out_size,
-                    image: ImageOut::PassThrough { id, smaller },
-                    image_ctm: unit_to_display.then(to_out),
-                    text,
-                    route: PageRoute::PassThrough,
-                });
-            }
-        }
-    Ok(PageOutput { size: out_size, image: ImageOut::Encoded(encoded), image_ctm, text, route })
+/// Everything a raster page needs from its source.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PageJob {
+    pub settings: Settings,
+    pub ops: PixelOps,
+    pub out_size: (f64, f64),
+    /// Maps display space to output space.
+    pub to_out: Matrix,
+    /// Size of the source page as displayed, in points.
+    pub display_size: (f64, f64),
+    pub ppi_factor: f64,
+    pub route: PageRoute,
+    pub ops_are_noop: bool,
+    /// The scan image that is the whole page, and its placement in display space.
+    pub embedded: Option<(ObjectId, Matrix)>,
+    /// The scan image's data, when this module can decode it.
+    pub image: Option<StoredImage>,
+    /// Pixels per point of the render of the page (display space) that
+    /// `run_page_job` needs, when there is no image to decode.
+    pub render: Option<f64>,
+    /// JPEG quality of the image the page is made of, for "No compression".
+    pub source_quality: Option<u8>,
 }
 
-/// The page's pixels, cropped to the output page.
-fn acquire(source: &Source, page: &Page, embedded: Option<(ObjectId, Matrix)>, info: Option<ImageInfo>, gray: bool) -> Result<Placed> {
+/// Reads what a raster (not preserved) page needs from its source.
+pub fn page_job(source: &Source, page: &Page, settings: Settings) -> Result<PageJob> {
     let sp = &source.pages[page.index];
-    let to_out = page.view.display_to_output(sp.display_size);
-    let out_size = page.view.output_size(sp.display_size);
-    let placed = match (embedded, info) {
-        (Some((id, unit_to_display)), Some(info)) => {
-            let raster = pdfimage::decode(&source.doc, id, &info, gray)?;
-            let (w, h) = (raster.width as f64, raster.height as f64);
-            let px_to_unit = Matrix::new(1.0 / w, 0.0, 0.0, -1.0 / h, 0.0, 1.0);
-            Placed { raster, px_to_out: px_to_unit.then(unit_to_display).then(to_out), ppi_factor: sp.ppi_factor }
-        }
-        _ => {
+    let Plan { embedded, info, ops_are_noop, route } = plan(source, page, settings)?;
+    let image = match (embedded, info) {
+        (Some((id, _)), Some(info)) => Some(pdfimage::extract(&source.doc, id, &info)?),
+        _ => None,
+    };
+    let main = embedded.or_else(|| if page.kind == PageKind::Scan { sp.main_image() } else { None });
+    let needs_pixels = route != PageRoute::PassThrough || settings.ocr;
+    let render = match image {
+        None if needs_pixels => {
             // Render at the resolution of the page's main image, if it has
             // one, else at the working resolution.
-            let main = embedded.or_else(|| if page.kind == crate::model::PageKind::Scan { sp.main_image() } else { None });
             let ppi = match main {
                 Some((id, unit_to_display)) => native_ppi(source, id, unit_to_display)?.unwrap_or(WORK_PPI),
                 None => WORK_PPI / sp.ppi_factor,
@@ -322,18 +257,125 @@ fn acquire(source: &Source, page: &Page, embedded: Option<(ObjectId, Matrix)>, i
             // Bound memory: no render above MAX_RENDER_PIXELS.
             let (dw, dh) = sp.display_size;
             let cap = (MAX_RENDER_PIXELS / (dw / 72.0 * dh / 72.0)).sqrt();
-            let ppp = ppi.min(cap) / 72.0;
-            let mut raster = render::render_page(&source.render_path, page.index, ppp, sp.display_size)?;
+            Some(ppi.min(cap) / 72.0)
+        }
+        _ => None,
+    };
+    // No compression: match the quality of the JPEG the page is made of.
+    let source_quality = match main {
+        Some((id, _)) if settings.jpeg_quality().is_none() && !page.color.is_bilevel() => source_jpeg_quality(source, id)?,
+        _ => None,
+    };
+    Ok(PageJob {
+        settings,
+        ops: page.pixel_ops(),
+        out_size: page.view.output_size(sp.display_size),
+        to_out: page.view.display_to_output(sp.display_size),
+        display_size: sp.display_size,
+        ppi_factor: sp.ppi_factor,
+        route,
+        ops_are_noop,
+        embedded,
+        image,
+        render,
+        source_quality,
+    })
+}
+
+/// Processes a raster page. `rendered` is the render `job.render` asks for.
+pub fn run_page_job(job: &PageJob, rendered: Option<Raster>) -> Result<PageOutput> {
+    let mut rendered = rendered;
+    let ocr = job.settings.ocr;
+    let color = job.ops.color;
+    let out = |image, image_ctm, ocr, route| PageOutput { size: job.out_size, image, image_ctm, ocr, text: None, route };
+
+    if let Some((id, unit_to_display)) = job.embedded {
+        let image_ctm = unit_to_display.then(job.to_out);
+        if job.route == PageRoute::PassThrough {
+            let smaller = match &job.image {
+                Some(image) => lossless_shrink(image)?,
+                None => None,
+            };
+            let ocr = if ocr { Some(ocr_input(acquire(job, rendered.take(), true)?.limit_ppi(WORK_PPI)?)?) } else { None };
+            return Ok(out(ImageOut::PassThrough { id, smaller }, image_ctm, ocr, PageRoute::PassThrough));
+        }
+        // Grayscale without re-encoding: keep the JPEG's luma channel.
+        if let (PageRoute::ExactGray, Some(stored)) = (job.route, &job.image)
+            && let Some(image) = exact_gray(stored)? {
+                let ocr = if ocr { Some(ocr_input(acquire(job, rendered.take(), true)?.limit_ppi(WORK_PPI)?)?) } else { None };
+                return Ok(out(ImageOut::Derived { id, image }, image_ctm, ocr, PageRoute::ExactGray));
+            }
+    }
+
+    let gray_only = color != ColorMode::Color;
+    let placed = acquire(job, rendered.take(), gray_only)?;
+    let route = if job.image.is_some() { PageRoute::Reencoded } else { PageRoute::Rendered };
+    let target_ppi = job.settings.max_dpi(color);
+
+    // OCR reads the cleaned gray image at up to WORK_PPI; the output uses
+    // the level's resolution. When both are the same, clean up once.
+    let same = placed.ppi().min(WORK_PPI) == placed.ppi().min(target_ppi);
+    let ocr_placed = match (ocr, same) {
+        (true, false) => Some(Placed { raster: placed.raster.clone(), ..placed }.limit_ppi(WORK_PPI)?),
+        _ => None,
+    };
+    let work = placed.limit_ppi(target_ppi)?;
+    let scale = work.ppi() / 300.0;
+    let cleaned = pixel::apply_cleanup(work.raster, job.ops, scale);
+    let ocr = match (ocr, ocr_placed) {
+        (false, _) => None,
+        (true, Some(p)) => {
+            let s = p.ppi() / 300.0;
+            Some(ocr_input(Placed { raster: pixel::apply_cleanup(p.raster, job.ops, s).to_gray(), ..p })?)
+        }
+        (true, None) => Some(ocr_input(Placed { raster: cleaned.to_gray(), px_to_out: work.px_to_out, ppi_factor: work.ppi_factor })?),
+    };
+    let image_ctm = unit_ctm(cleaned.width, cleaned.height, work.px_to_out);
+    let raster = pixel::apply_color_mode(cleaned, color, scale);
+
+    let encoded = if color.is_bilevel() {
+        encode::encode_jbig2(&raster)?
+    } else {
+        // No compression: the quality of the source JPEG, else lossless.
+        match job.settings.jpeg_quality().or(job.source_quality) {
+            Some(q) => encode::encode_jpeg(&raster, q)?,
+            None => encode::encode_flate_png(&raster),
+        }
+    };
+
+    // Recompressing an untouched scan must pay for itself.
+    if let (Some((id, unit_to_display)), Some(image)) = (job.embedded, &job.image)
+        && job.ops_are_noop {
+            let share = (job.out_size.0 * job.out_size.1) / unit_to_display.then(job.to_out).det().abs().max(1e-9);
+            if encoded.data.len() as f64 >= image.info.encoded_len as f64 * share.min(1.0) {
+                let smaller = lossless_shrink(image)?;
+                return Ok(out(ImageOut::PassThrough { id, smaller }, unit_to_display.then(job.to_out), ocr, PageRoute::PassThrough));
+            }
+        }
+    Ok(out(ImageOut::Encoded(encoded), image_ctm, ocr, route))
+}
+
+/// The page's pixels, cropped to the output page.
+fn acquire(job: &PageJob, rendered: Option<Raster>, gray: bool) -> Result<Placed> {
+    let placed = match (job.embedded, &job.image) {
+        (Some((_, unit_to_display)), Some(image)) => {
+            let raster = image.decode(gray)?;
+            let (w, h) = (raster.width as f64, raster.height as f64);
+            let px_to_unit = Matrix::new(1.0 / w, 0.0, 0.0, -1.0 / h, 0.0, 1.0);
+            Placed { raster, px_to_out: px_to_unit.then(unit_to_display).then(job.to_out), ppi_factor: job.ppi_factor }
+        }
+        _ => {
+            let mut raster = rendered.context("the page needs a render")?;
             if gray {
                 raster = raster.to_gray();
             }
             let (w, h) = (raster.width as f64, raster.height as f64);
-            let (dw, dh) = sp.display_size;
+            let (dw, dh) = job.display_size;
             let px_to_display = Matrix::new(dw / w, 0.0, 0.0, -dh / h, 0.0, dh);
-            Placed { raster, px_to_out: px_to_display.then(to_out), ppi_factor: sp.ppi_factor }
+            Placed { raster, px_to_out: px_to_display.then(job.to_out), ppi_factor: job.ppi_factor }
         }
     };
-    placed.crop_to_page(out_size)
+    placed.crop_to_page(job.out_size)
 }
 
 /// The luma channel of a YCbCr JPEG image as a grayscale JPEG, made from
@@ -341,13 +383,12 @@ fn acquire(source: &Source, page: &Page, embedded: Option<(ObjectId, Matrix)>, i
 /// original: scans of gray paper carry almost no chroma, and the output is
 /// baseline where originals are often progressive.
 /// `None` when the image is not a YCbCr JPEG.
-fn exact_gray(source: &Source, id: ObjectId, info: &ImageInfo) -> Result<Option<EncodedImage>> {
+fn exact_gray(image: &StoredImage) -> Result<Option<EncodedImage>> {
+    let info = &image.info;
     if !matches!(info.codec, ImageCodec::Jpeg | ImageCodec::FlateJpeg) || info.channels != 3 {
         return Ok(None);
     }
-    let stream = pdfimage::image_stream(&source.doc, id)?;
-    let jpeg = pdfimage::jpeg_data(stream, info)?;
-    let Ok(gray) = crate::jpeggray::luma_only(&jpeg) else { return Ok(None) };
+    let Ok(gray) = crate::jpeggray::luma_only(&image.jpeg_data()?) else { return Ok(None) };
     let image = encode::wrap_jpeg(EncodedImage { width: info.width, height: info.height, channels: 1, bits_per_component: 8, filter: ImageFilter::Dct, data: gray });
     Ok((image.data.len() * 100 <= info.encoded_len * 110).then_some(image))
 }
@@ -358,8 +399,8 @@ fn source_jpeg_quality(source: &Source, id: ObjectId) -> Result<Option<u8>> {
     if !matches!(info.codec, ImageCodec::Jpeg | ImageCodec::FlateJpeg) {
         return Ok(None);
     }
-    let stream = pdfimage::image_stream(&source.doc, id)?;
-    Ok(Some(encode::jpeg_quality(&pdfimage::jpeg_data(stream, &info)?).unwrap_or(90).clamp(50, 95)))
+    let image = pdfimage::extract(&source.doc, id, &info)?;
+    Ok(Some(encode::jpeg_quality(&image.jpeg_data()?).unwrap_or(90).clamp(50, 95)))
 }
 
 fn native_ppi(source: &Source, id: ObjectId, unit_to_display: Matrix) -> Result<Option<f64>> {
@@ -370,40 +411,54 @@ fn native_ppi(source: &Source, id: ObjectId, unit_to_display: Matrix) -> Result<
     Ok(width.map(|w| w as f64 * 72.0 / extent.max(1e-6)))
 }
 
-fn ocr_layer(engine: &mut Engine, placed: Placed) -> Result<Vec<u8>> {
+fn ocr_input(placed: Placed) -> Result<OcrInput> {
     let up = Placed { raster: placed.raster.to_gray(), ..placed }.upright()?;
     let ppi = up.ppi().round() as u32;
-    let lines = engine.recognize(&up.raster, ppi)?;
-    Ok(ocr::text_layer(&lines, up.px_to_out))
+    Ok(OcrInput { raster: up.raster, px_to_out: up.px_to_out, ppi })
 }
 
 /// A strictly smaller lossless encoding of an image, if one exists: JPEGs
 /// wrapped in Flate, Flate images refiltered, bilevel ones as JBIG2.
-pub fn lossless_shrink(source: &Source, id: ObjectId, info: &ImageInfo) -> Result<Option<EncodedImage>> {
-    let stream = pdfimage::image_stream(&source.doc, id)?;
+pub fn lossless_shrink(image: &StoredImage) -> Result<Option<EncodedImage>> {
+    let info = &image.info;
     let candidate = match info.codec {
         // The JPEG itself stays as it is; only a Flate layer may change.
         ImageCodec::Jpeg | ImageCodec::FlateJpeg => {
-            let data = pdfimage::jpeg_data(stream, info)?.into_owned();
+            let data = image.jpeg_data()?.into_owned();
             let plain = EncodedImage { width: info.width, height: info.height, channels: info.channels, bits_per_component: 8, filter: ImageFilter::Dct, data };
             encode::wrap_jpeg(plain)
         }
-        ImageCodec::Flate8 => encode::encode_flate_png(&pdfimage::decode(&source.doc, id, info, false)?),
-        ImageCodec::Flate1 => encode::encode_jbig2(&pdfimage::decode(&source.doc, id, info, false)?)?,
+        ImageCodec::Flate8 => encode::encode_flate_png(&image.decode(false)?),
+        ImageCodec::Flate1 => encode::encode_jbig2(&image.decode(false)?)?,
     };
     Ok((candidate.data.len() < info.encoded_len).then_some(candidate))
 }
 
-/// Recompresses an image of a preserved page when that makes it smaller.
-/// `shown_ppi` is its resolution where it is drawn largest; at compression
-/// levels, images far sharper than twice the level's resolution are
-/// downsampled. Images with a soft mask (graphics) stay lossless.
-pub fn recompress_preserved_image(source: &Source, id: ObjectId, compression: Compression, shown_ppi: Option<f64>) -> Result<Option<EncodedImage>> {
+/// An image of a preserved page to recompress.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageJob {
+    pub image: StoredImage,
+    pub compression: Compression,
+    /// Its resolution where it is drawn largest.
+    pub shown_ppi: Option<f64>,
+}
+
+/// The recompression job of an image, `None` when it cannot be decoded.
+pub fn image_job(source: &Source, id: ObjectId, compression: Compression, shown_ppi: Option<f64>) -> Result<Option<ImageJob>> {
     let Some(info) = pdfimage::inspect_with(&source.doc, id, true)? else { return Ok(None) };
-    let Some(quality) = compression.jpeg_quality() else { return lossless_shrink(source, id, &info) };
-    let mut raster = pdfimage::decode(&source.doc, id, &info, false)?;
-    let target = 2.0 * compression.max_dpi(ColorMode::Color).unwrap_or(f64::INFINITY);
-    if let Some(ppi) = shown_ppi.filter(|&p| p > 1.5 * target && info.codec != ImageCodec::Flate1) {
+    Ok(Some(ImageJob { image: pdfimage::extract(&source.doc, id, &info)?, compression, shown_ppi }))
+}
+
+/// Recompresses an image of a preserved page when that makes it smaller.
+/// At compression levels, images far sharper than twice the level's
+/// resolution are downsampled. Images with a soft mask (graphics) stay
+/// lossless.
+pub fn run_image_job(job: &ImageJob) -> Result<Option<EncodedImage>> {
+    let (image, info) = (&job.image, &job.image.info);
+    let Some(quality) = job.compression.jpeg_quality() else { return lossless_shrink(image) };
+    let mut raster = image.decode(false)?;
+    let target = 2.0 * job.compression.max_dpi(ColorMode::Color).unwrap_or(f64::INFINITY);
+    if let Some(ppi) = job.shown_ppi.filter(|&p| p > 1.5 * target && info.codec != ImageCodec::Flate1) {
         let f = target / ppi;
         let (w, h) = (((raster.width as f64 * f).round() as u32).max(1), ((raster.height as f64 * f).round() as u32).max(1));
         raster = raster.resize(w, h)?;
@@ -416,7 +471,23 @@ pub fn recompress_preserved_image(source: &Source, id: ObjectId, compression: Co
     if candidate.data.len() < info.encoded_len {
         return Ok(Some(candidate));
     }
-    lossless_shrink(source, id, &info)
+    lossless_shrink(image)
+}
+
+/// Processes a raster page with MuPDF rendering and Tesseract.
+#[cfg(feature = "native")]
+pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Option<&mut crate::ocr::Engine>) -> Result<PageOutput> {
+    let job = page_job(source, page, settings)?;
+    let rendered = match job.render {
+        Some(ppp) => Some(crate::render::render_page(&source.render_path, page.index, ppp, job.display_size)?),
+        None => None,
+    };
+    let mut output = run_page_job(&job, rendered)?;
+    if let (Some(engine), Some(input)) = (engine, output.ocr.take()) {
+        let lines = engine.recognize(&input.raster, input.ppi)?;
+        output.text = Some(crate::textlayer::text_layer(&lines, input.px_to_out));
+    }
+    Ok(output)
 }
 
 pub fn color_tag(pages: &[Page]) -> &'static str {

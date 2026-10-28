@@ -1,17 +1,19 @@
 //! Copies object graphs from a source document into the output.
 
+use crate::source::Source;
 use crate::writer::{OutId, PdfWriter, reference};
 use anyhow::Result;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Keys never copied from a page dictionary: the output builds its own page
 /// tree, and thumbnails and article beads point at the old document.
 const DROPPED_PAGE_KEYS: [&[u8]; 4] = [b"Parent", b"Thumb", b"B", b"StructParents"];
 
 /// Copies objects of one source, each at most once.
-pub struct Copier<'a> {
-    src: &'a Document,
+pub struct Copier {
+    src: Arc<Source>,
     ids: HashMap<ObjectId, OutId>,
     pending: Vec<ObjectId>,
     /// Source pages that are in the output, and their output ids: links
@@ -21,13 +23,13 @@ pub struct Copier<'a> {
     pub replacements: HashMap<ObjectId, Object>,
 }
 
-impl<'a> Copier<'a> {
-    pub fn new(src: &'a Document) -> Self {
+impl Copier {
+    pub fn new(src: Arc<Source>) -> Self {
         Copier { src, ids: HashMap::new(), pending: Vec::new(), page_targets: HashMap::new(), replacements: HashMap::new() }
     }
 
-    pub fn source(&self) -> &'a Document {
-        self.src
+    pub fn source(&self) -> &Document {
+        &self.src.doc
     }
 
     pub fn map_ref(&mut self, w: &mut PdfWriter, id: ObjectId) -> OutId {
@@ -84,7 +86,8 @@ impl<'a> Copier<'a> {
                 w.write(out, &converted)?;
                 continue;
             }
-            let object = match self.src.get_object(id) {
+            let src = self.src.clone();
+            let object = match src.doc.get_object(id) {
                 Ok(o) => o,
                 // A dangling reference is null by definition.
                 Err(_) => &Object::Null,

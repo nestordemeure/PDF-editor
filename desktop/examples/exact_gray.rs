@@ -5,7 +5,8 @@ fn main() -> anyhow::Result<()> {
     for (i, p) in source.pages.iter().enumerate() {
         let Some((id, _)) = p.scan_image() else { continue };
         let Some(info) = pdf_editor::pdfimage::inspect(&source.doc, id)? else { continue };
-        let jpeg = pdf_editor::pdfimage::jpeg_data(pdf_editor::pdfimage::image_stream(&source.doc, id)?, &info)?;
+        let image = pdf_editor::pdfimage::extract(&source.doc, id, &info)?;
+        let jpeg = image.jpeg_data()?;
         match pdf_editor::jpeggray::luma_only(&jpeg) {
             Ok(g) => {
                 println!("page {}: original {} gray {}", i + 1, jpeg.len(), g.len());

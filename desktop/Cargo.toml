@@ -5,23 +5,44 @@ edition = "2024"
 license = "AGPL-3.0-or-later"
 default-run = "pdf-editor"
 
+[features]
+default = ["native"]
+# MuPDF rendering, Tesseract, threads, files and the user interface. Without
+# it the engine builds for WebAssembly (the web app in `web/`).
+native = ["dep:clap", "dep:eframe", "dep:egui", "dep:mupdf", "dep:rayon", "dep:rfd", "dep:tesseract-rs", "dep:ureq", "dep:tempfile"]
+
+[[bin]]
+name = "pdf-editor"
+path = "src/main.rs"
+required-features = ["native"]
+
+[[bin]]
+name = "pdf-editor-cli"
+path = "src/bin/pdf-editor-cli.rs"
+required-features = ["native"]
+
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-eframe = "0.35"
-egui = "0.35"
+clap = { version = "4", features = ["derive"], optional = true }
+eframe = { version = "0.35", optional = true }
+egui = { version = "0.35", optional = true }
 fast_image_resize = "5"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 jbig2enc-rust = "0.5"
 lopdf = "0.46"
-mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }
-rayon = "1"
-rfd = "0.15"
-tesseract-rs = "0.4"
-ureq = "3"
+mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"], optional = true }
+rayon = { version = "1", optional = true }
+rfd = { version = "0.15", optional = true }
+serde = { version = "1", features = ["derive"] }
+tesseract-rs = { version = "0.4", optional = true }
+ureq = { version = "3", optional = true }
 enough = "0.4"
-tempfile = "3"
+tempfile = { version = "3", optional = true }
 zenjpeg = { version = "0.8", features = ["trellis"] }
+
+# lopdf's encryption code needs random numbers; in browsers they come from Web Crypto.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [profile.release]
 debug = 1

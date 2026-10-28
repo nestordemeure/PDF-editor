@@ -1,14 +1,12 @@
-//! Streaming PDF writer: each object goes to disk as soon as it is ready,
-//! so memory does not grow with the document.
+//! Streaming PDF writer: each object goes out as soon as it is ready, so
+//! memory does not grow with the document.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use lopdf::{Dictionary, Object, StringFormat};
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::io::Write;
 
 pub struct PdfWriter {
-    out: BufWriter<File>,
+    out: Box<dyn Write>,
     pos: u64,
     /// Where each object is; index 0 is the free-list head.
     entries: Vec<Entry>,
@@ -38,10 +36,10 @@ pub fn reference(id: OutId) -> Object {
 }
 
 impl PdfWriter {
-    pub fn create(path: &Path) -> Result<Self> {
-        let file = File::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+    /// Starts a PDF file on `out`, which should be buffered.
+    pub fn new(out: Box<dyn Write>) -> Result<Self> {
         let mut w = PdfWriter {
-            out: BufWriter::with_capacity(1 << 20, file),
+            out,
             pos: 0,
             entries: vec![Entry::Unwritten],
             packed: Vec::new(),
@@ -55,6 +53,11 @@ impl PdfWriter {
         self.out.write_all(bytes)?;
         self.pos += bytes.len() as u64;
         Ok(())
+    }
+
+    /// Bytes written so far.
+    pub fn position(&self) -> u64 {
+        self.pos
     }
 
     pub fn alloc(&mut self) -> OutId {
@@ -134,8 +137,8 @@ impl PdfWriter {
         self.write_raw_stream(stream_id, &dict, &crate::encode::zlib(&data))
     }
 
-    /// Writes the cross-reference stream, and flushes the file.
-    pub fn finish(mut self, root: OutId, info: Option<OutId>) -> Result<()> {
+    /// Writes the cross-reference stream, and flushes. Returns the file size.
+    pub fn finish(mut self, root: OutId, info: Option<OutId>) -> Result<u64> {
         self.flush_packed()?;
         let xref_id = self.alloc();
         if let Some(missing) = self.entries.iter().enumerate().skip(1).position(|(i, e)| matches!(e, Entry::Unwritten) && i != xref_id as usize) {
@@ -167,7 +170,7 @@ impl PdfWriter {
         self.write_raw_stream(xref_id, &dict, &crate::encode::zlib(&table))?;
         self.raw(format!("startxref\n{xref_pos}\n%%EOF\n").as_bytes())?;
         self.out.flush()?;
-        Ok(())
+        Ok(self.pos)
     }
 }
 

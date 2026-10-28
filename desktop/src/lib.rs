@@ -1,22 +1,31 @@
 //! Core of the PDF editor: everything except the user interface.
+//!
+//! Without the `native` feature, the library has no threads, files, MuPDF
+//! or Tesseract, and builds for WebAssembly.
 
+pub mod assemble;
 pub mod content;
 pub mod copy;
 pub mod encode;
 pub mod geometry;
 pub mod jpeggray;
 pub mod model;
+#[cfg(feature = "native")]
 pub mod ocr;
 pub mod pdfimage;
 pub mod pipeline;
 pub mod pixel;
+#[cfg(feature = "native")]
 pub mod render;
+#[cfg(feature = "native")]
 pub mod save;
 pub mod source;
 pub mod textcrop;
+pub mod textlayer;
 pub mod writer;
 
 /// Process-wide setup; call first in `main`.
+#[cfg(feature = "native")]
 pub fn init_process() {
     // Tesseract must not start its own thread pool inside each worker.
     // SAFETY: called before any other thread exists.
@@ -24,10 +33,10 @@ pub fn init_process() {
 }
 
 /// Peak resident memory of this process, in megabytes.
+#[cfg(feature = "native")]
 pub fn peak_rss_mb() -> u64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| s.lines().find(|l| l.starts_with("VmHWM:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()))
         .map_or(0, |kb| kb / 1024)
 }
-

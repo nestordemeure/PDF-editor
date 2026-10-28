@@ -4,9 +4,10 @@
 //! turns), a color mode and two cleanup flags. Pixel operations always run
 //! in the canonical order: remove shading, enhance contrast, color mode.
 
+use serde::{Deserialize, Serialize};
 use crate::geometry::{Matrix, Rect, rotate_cw_quarters};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColorMode {
     Color,
     Gray,
@@ -41,7 +42,7 @@ impl ColorMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Compression {
     /// Keep the source resolution and quality.
     None,
@@ -97,14 +98,14 @@ impl Compression {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Side {
     Left,
     Right,
 }
 
 /// What a page is, decided at load time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PageKind {
     /// Treated as an image: rasterized, cleaned up and OCR'd.
     Scan,
@@ -116,7 +117,7 @@ pub enum PageKind {
 
 /// Visible part of a source page: a crop in normalized display coordinates
 /// (origin top-left, y down, `[0, 1]²`), then clockwise quarter turns.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct View {
     pub crop: Rect,
     pub quarter_turns: u32,
@@ -188,7 +189,7 @@ impl View {
 
 pub type SourceId = usize;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Page {
     pub source: SourceId,
     /// Zero-based page index in the source.
@@ -222,7 +223,7 @@ impl Page {
 }
 
 /// The pixel operations of a page, in canonical order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PixelOps {
     pub remove_shading: bool,
     pub enhance_contrast: bool,

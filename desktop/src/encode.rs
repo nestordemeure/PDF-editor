@@ -1,12 +1,13 @@
 //! Image codecs: JPEG (zenjpeg), JBIG2 (lossless generic regions), Flate.
 
+use serde::{Deserialize, Serialize};
 use crate::pixel::Raster;
 use anyhow::{Context, Result, anyhow, bail};
 use enough::Unstoppable;
 use std::io::Write;
 
 /// An image ready to embed as a PDF image XObject.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncodedImage {
     pub width: u32,
     pub height: u32,
@@ -17,7 +18,7 @@ pub struct EncodedImage {
     pub data: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ImageFilter {
     Dct,
     /// JPEG wrapped in Flate, which shrinks entropy-coded data by a few percent.
