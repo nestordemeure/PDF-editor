@@ -311,8 +311,32 @@ pub fn otsu_threshold(gray: &Raster) -> u8 {
     threshold
 }
 
+/// Otsu refined to the midpoint of the ink and paper means (isodata).
+/// Otsu alone drifts toward the ink on pages that are mostly paper, which
+/// thins strokes; the midpoint keeps their width.
+pub fn flat_threshold(gray: &Raster) -> u8 {
+    let mut hist = [0u64; 256];
+    for &v in &gray.data {
+        hist[v as usize] += 1;
+    }
+    let mut t = otsu_threshold(gray) as usize;
+    for _ in 0..32 {
+        let mean = |range: std::ops::Range<usize>| {
+            let (n, sum) = range.fold((0u64, 0u64), |(n, s), i| (n + hist[i], s + hist[i] * i as u64));
+            (n > 0).then(|| sum as f64 / n as f64)
+        };
+        let (Some(ink), Some(paper)) = (mean(0..t + 1), mean(t + 1..256)) else { break };
+        let next = ((ink + paper) / 2.0).round() as usize;
+        if next == t {
+            break;
+        }
+        t = next.min(254);
+    }
+    t as u8
+}
+
 fn binarize_otsu(gray: &Raster) -> Raster {
-    let t = otsu_threshold(gray);
+    let t = flat_threshold(gray);
     let data = gray.data.iter().map(|&v| if v > t { 255 } else { 0 }).collect();
     Raster { width: gray.width, height: gray.height, channels: 1, data }
 }
@@ -323,7 +347,7 @@ fn binarize_otsu(gray: &Raster) -> Raster {
 fn binarize_sauvola(gray: &Raster, scale: f64) -> Raster {
     const K: f64 = 0.2;
     let (w, h) = (gray.width as usize, gray.height as usize);
-    let radius = scaled_radius(20.0, scale, 1);
+    let radius = scaled_radius(40.0, scale, 1);
     let src = &gray.data;
     let mut out = vec![0u8; w * h];
     let mut col_sum = vec![0u64; w];
