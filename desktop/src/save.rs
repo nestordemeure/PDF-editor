@@ -165,7 +165,7 @@ fn write_document(sources: &[Arc<Source>], pages: &[Page], options: &SaveOptions
     // Raster pages: workers produce, this thread writes.
     let settings = Settings { compression: options.compression, ocr: ocr_language.is_some(), max_dpi: options.max_dpi, jpeg_quality: options.jpeg_quality };
     let (tx, rx) = mpsc::sync_channel::<(usize, Result<PageOutput>)>(threads);
-    let mut shared_images: HashMap<(usize, ObjectId), OutId> = HashMap::new();
+    let mut shared_images: HashMap<(usize, ObjectId, bool), OutId> = HashMap::new();
     let mut first_error: Option<anyhow::Error> = None;
     std::thread::scope(|scope| -> Result<()> {
         let raster = &raster;
@@ -340,7 +340,7 @@ fn write_preserved_page(w: &mut PdfWriter, copier: &mut Copier, source: &Source,
 fn write_raster_page(
     w: &mut PdfWriter,
     copier: &mut Copier,
-    shared_images: &mut HashMap<(usize, ObjectId), OutId>,
+    shared_images: &mut HashMap<(usize, ObjectId, bool), OutId>,
     source_index: usize,
     output: PageOutput,
     layout: &Layout,
@@ -352,7 +352,16 @@ fn write_raster_page(
             w.write_stream(id, image_dict(&encoded), encoded.data)?;
             id
         }
-        ImageOut::PassThrough { id, smaller } => match shared_images.get(&(source_index, id)) {
+        ImageOut::Derived { id, image } => match shared_images.get(&(source_index, id, true)) {
+            Some(&out) => out,
+            None => {
+                let out = w.alloc();
+                w.write_stream(out, image_dict(&image), image.data)?;
+                shared_images.insert((source_index, id, true), out);
+                out
+            }
+        },
+        ImageOut::PassThrough { id, smaller } => match shared_images.get(&(source_index, id, false)) {
             Some(&out) => out,
             None => {
                 if let Some(encoded) = smaller {
@@ -361,7 +370,7 @@ fn write_raster_page(
                 }
                 let out = copier.map_ref(w, id);
                 copier.flush(w)?;
-                shared_images.insert((source_index, id), out);
+                shared_images.insert((source_index, id, false), out);
                 out
             }
         },

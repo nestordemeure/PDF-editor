@@ -28,9 +28,14 @@ pub enum PageRoute {
     Reencoded,
     /// Page rendered by MuPDF, processed and encoded.
     Rendered,
+    /// Luma channel of the original JPEG, without re-encoding.
+    ExactGray,
 }
 
 pub enum ImageOut {
+    /// A new image derived from a source image without decoding it (exact
+    /// grayscale), shared by every page that shows that image.
+    Derived { id: ObjectId, image: EncodedImage },
     /// The source image object, optionally with smaller lossless data.
     PassThrough { id: ObjectId, smaller: Option<EncodedImage> },
     Encoded(EncodedImage),
@@ -159,21 +164,38 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
         None => None,
     };
 
-    // Untouched scan pages keep their image stream.
+    // Pages whose pixel operations do nothing on this image (or that have
+    // none) keep their image stream.
+    let ops_are_noop = !page.remove_shading
+        && !page.enhance_contrast
+        && match (page.color, info) {
+            (ColorMode::Color, _) => true,
+            (ColorMode::Gray, Some(i)) => i.channels == 1,
+            (ColorMode::BwFlat, Some(i)) => i.codec == ImageCodec::Flate1,
+            _ => false,
+        };
     if let Some((id, unit_to_display)) = embedded {
-        if !page.has_pixel_ops() {
-            let image_ctm = unit_to_display.then(to_out);
-            let reuse = settings.keeps_originals() || info.is_none();
-            if reuse {
-                let smaller = match info {
-                    Some(info) => lossless_shrink(source, id, &info)?,
-                    None => None,
-                };
-                let text = match engine {
-                    Some(engine) => Some(ocr_layer(engine, acquire(source, sp, page, embedded, info, to_out, out_size, true)?.limit_ppi(WORK_PPI)?)?),
-                    None => None,
-                };
-                return Ok(PageOutput { size: out_size, image: ImageOut::PassThrough { id, smaller }, image_ctm, text, route: PageRoute::PassThrough });
+        let image_ctm = unit_to_display.then(to_out);
+        let ocr = |engine: Option<&mut Engine>| -> Result<Option<Vec<u8>>> {
+            match engine {
+                Some(e) => Ok(Some(ocr_layer(e, acquire(source, sp, page, embedded, info, to_out, out_size, true)?.limit_ppi(WORK_PPI)?)?)),
+                None => Ok(None),
+            }
+        };
+        if ops_are_noop && (settings.keeps_originals() || info.is_none()) {
+            let smaller = match info {
+                Some(info) => lossless_shrink(source, id, &info)?,
+                None => None,
+            };
+            let text = ocr(engine)?;
+            return Ok(PageOutput { size: out_size, image: ImageOut::PassThrough { id, smaller }, image_ctm, text, route: PageRoute::PassThrough });
+        }
+        // Grayscale without re-encoding: keep the JPEG's luma channel.
+        let plain_gray = page.color == ColorMode::Gray && !page.remove_shading && !page.enhance_contrast;
+        if let (true, true, Some(info)) = (plain_gray, settings.keeps_originals(), info) {
+            if let Some(image) = exact_gray(source, id, &info)? {
+                let text = ocr(engine)?;
+                return Ok(PageOutput { size: out_size, image: ImageOut::Derived { id, image }, image_ctm, text, route: PageRoute::ExactGray });
             }
         }
     }
@@ -231,9 +253,9 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
         }
     };
 
-    // Recompressing an untouched color scan must pay for itself.
+    // Recompressing an untouched scan must pay for itself.
     if let (Some((id, unit_to_display)), Some(info)) = (embedded, info) {
-        if !page.has_pixel_ops() {
+        if ops_are_noop {
             let share = (out_size.0 * out_size.1) / unit_to_display.then(to_out).det().abs().max(1e-9);
             if encoded.data.len() as f64 >= info.encoded_len as f64 * share.min(1.0) {
                 let smaller = lossless_shrink(source, id, &info)?;
@@ -292,6 +314,26 @@ fn acquire(
         }
     };
     placed.crop_to_page(out_size)
+}
+
+/// The luma channel of a YCbCr JPEG image as a grayscale JPEG, made from
+/// its coefficients (exact), unless it is more than 2% larger than the
+/// original (scans of gray paper carry almost no chroma).
+/// `None` when the image is not a YCbCr JPEG.
+fn exact_gray(source: &Source, id: ObjectId, info: &ImageInfo) -> Result<Option<EncodedImage>> {
+    if !matches!(info.codec, ImageCodec::Jpeg | ImageCodec::FlateJpeg) || info.channels != 3 {
+        return Ok(None);
+    }
+    let stream = pdfimage::image_stream(&source.doc, id)?;
+    let jpeg = pdfimage::jpeg_data(stream, info)?;
+    let Ok(mut gray) = crate::jpeggray::luma_only(&jpeg) else { return Ok(None) };
+    if let Ok(progressive) = encode::repack_jpeg(&gray) {
+        if progressive.len() < gray.len() {
+            gray = progressive;
+        }
+    }
+    let image = encode::wrap_jpeg(EncodedImage { width: info.width, height: info.height, channels: 1, bits_per_component: 8, filter: ImageFilter::Dct, data: gray });
+    Ok((image.data.len() * 100 <= info.encoded_len * 102).then_some(image))
 }
 
 /// Quality of a JPEG image XObject, `None` for other codecs.

@@ -4,6 +4,7 @@ pub mod content;
 pub mod copy;
 pub mod encode;
 pub mod geometry;
+pub mod jpeggray;
 pub mod model;
 pub mod ocr;
 pub mod pdfimage;
