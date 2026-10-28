@@ -174,11 +174,12 @@ fn write_document(sources: &[Arc<Source>], pages: &[Page], options: &SaveOptions
             let original = &sources[s].doc.get_object(id)?.as_stream()?.dict;
             copiers[s].replacements.insert(id, Object::Stream(lopdf::Stream::new(replacement_dict(original, &encoded), encoded.data)));
         }
+        let (mut filtered, removed, failed) = filter_cropped_text(sources, pages, &preserved)?;
+        report.hidden_text_removed = removed;
+        report.hidden_text_kept_pages = failed;
         for &i in &preserved {
-            match write_preserved_page(&mut w, &mut copiers[pages[i].source], &sources[pages[i].source], &pages[i], layout.page_ids[i], layout.pages_root)? {
-                Some(n) => report.hidden_text_removed += n,
-                None => report.hidden_text_kept_pages += 1,
-            }
+            let content = filtered.remove(&i);
+            write_preserved_page(&mut w, &mut copiers[pages[i].source], &sources[pages[i].source], &pages[i], layout.page_ids[i], layout.pages_root, content)?;
             *report.routes.entry(PageRoute::Copied).or_default() += 1;
             tick("Copying text pages");
         }
@@ -338,31 +339,53 @@ fn rect_object(x0: f64, y0: f64, x1: f64, y1: f64) -> Object {
     Object::Array(vec![number(x0), number(y0), number(x1), number(y1)])
 }
 
-/// Copies a text page. Returns how many hidden text runs were removed, or
-/// `None` when the page is cropped but its content could not be filtered.
-fn write_preserved_page(w: &mut PdfWriter, copier: &mut Copier, source: &Source, page: &Page, out_id: OutId, parent: OutId) -> Result<Option<usize>> {
-    let sp = &source.pages[page.index];
-    let crop = page.view.crop_in_display(sp.display_size).transform(sp.user_to_display.invert().context("degenerate page")?);
-    // A cropped page (half of a spread) drops the text it no longer shows.
-    let mut filtered = None;
-    let mut removed = Some(0);
-    if !page.view.is_identity() {
+/// Cropped text pages (halves of spreads) without the text and graphics
+/// they no longer show. All crops of a source page are decided together:
+/// filtering replaces the shared content with one copy per crop, which pays
+/// only when the copies together are about the original's size (a spread
+/// whose halves each hold their own text). Returns, per output page, the
+/// new content, plus the removed run count and the pages that could not be
+/// filtered.
+fn filter_cropped_text(sources: &[Arc<Source>], pages: &[Page], preserved: &[usize]) -> Result<(HashMap<usize, Vec<u8>>, usize, usize)> {
+    let mut groups: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for &i in preserved {
+        if !pages[i].view.is_identity() {
+            groups.entry((pages[i].source, pages[i].index)).or_default().push(i);
+        }
+    }
+    let (mut filtered, mut removed, mut failed) = (HashMap::new(), 0, 0);
+    for ((s, index), members) in groups {
+        let (source, sp) = (&sources[s], &sources[s].pages[index]);
         let resources = match inherited(&source.doc, sp.id, b"Resources") {
             Some(Object::Dictionary(d)) => d,
             _ => Dictionary::new(),
         };
         let content = crate::content::page_content_bytes(&source.doc, sp.id)?;
-        match crate::textcrop::drop_text_outside(&source.doc, &resources, &content, crop) {
-            // Each half then needs its own content instead of a shared one:
-            // worth it only when the other half's text goes (a spread).
-            Ok(Some(cropped)) if cropped.content.len() * 100 <= content.len() * 55 => {
-                removed = Some(cropped.removed);
-                filtered = Some(cropped.content);
+        let mut results = Vec::new();
+        for &i in &members {
+            let crop = pages[i].view.crop_in_display(sp.display_size).transform(sp.user_to_display.invert().context("degenerate page")?);
+            match crate::textcrop::drop_text_outside(&source.doc, &resources, &content, crop) {
+                Ok(Some(c)) => results.push((i, c)),
+                Ok(None) => {}
+                Err(_) => failed += 1,
             }
-            Ok(_) => {}
-            Err(_) => removed = None,
+        }
+        // Every crop must be filtered, or the shared original stays anyway.
+        let total: usize = results.iter().map(|(_, c)| c.content.len()).sum();
+        if results.len() == members.len() && total * 100 <= content.len() * 110 {
+            for (i, c) in results {
+                removed += c.removed;
+                filtered.insert(i, c.content);
+            }
         }
     }
+    Ok((filtered, removed, failed))
+}
+
+/// Copies a text page, with `content` replacing its own when given.
+fn write_preserved_page(w: &mut PdfWriter, copier: &mut Copier, source: &Source, page: &Page, out_id: OutId, parent: OutId, filtered: Option<Vec<u8>>) -> Result<()> {
+    let sp = &source.pages[page.index];
+    let crop = page.view.crop_in_display(sp.display_size).transform(sp.user_to_display.invert().context("degenerate page")?);
     let mut dict = source.doc.get_dictionary(sp.id)?.clone();
     if filtered.is_some() {
         dict.remove(b"Contents");
@@ -389,8 +412,7 @@ fn write_preserved_page(w: &mut PdfWriter, copier: &mut Copier, source: &Source,
     out.set("Rotate", Object::Integer((((sp.quarter_turns + page.view.quarter_turns) % 4) * 90) as i64));
     out.set("Parent", reference(parent));
     w.write(out_id, &Object::Dictionary(out))?;
-    copier.flush(w)?;
-    Ok(removed)
+    copier.flush(w)
 }
 
 fn write_raster_page(

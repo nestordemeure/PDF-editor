@@ -242,6 +242,48 @@ fn split_and_rotated_text_pages_stay_text() {
     assert_eq!(boxes[1], vec![0.0, 396.0, 612.0, 792.0]);
 }
 
+/// A spread: one line of text on each half, with a font that has widths.
+fn spread_pdf(path: &Path) {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let font = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        "FirstChar" => 32, "Widths" => vec![Object::Integer(556); 95],
+    });
+    let column = |x: u32, word: &str| {
+        let lines: String = (0..20).map(|k| format!("0 -14 Td ({word} line {k} of the column) Tj ")).collect();
+        format!("BT /F1 12 Tf {x} 720 Td {lines}ET ")
+    };
+    let ops = column(60, "LEFTPAGE") + &column(660, "RIGHTPAGE");
+    let content = doc.add_object(Stream::new(dictionary! {}, ops.as_bytes().to_vec()));
+    let page = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 1224.into(), 792.into()],
+        "Contents" => content, "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
+    });
+    finish(doc, pages_id, vec![Object::Reference(page)], path);
+}
+
+#[test]
+fn split_spreads_lose_the_other_halfs_text() {
+    let f = Fixture::new();
+    spread_pdf(&f.path("spread.pdf"));
+    let source = Arc::new(Source::open(&f.path("spread.pdf")).unwrap());
+    let mut left = Page::new(0, 0, PageKind::Text);
+    let mut right = left.clone();
+    left.view = left.view.split(Side::Left);
+    right.view = right.view.split(Side::Right);
+    let report = run(&[source], &[left, right], Compression::None, None, &f.path("out.pdf"));
+    assert!(report.hidden_text_removed > 0);
+    let doc = Document::load(f.path("out.pdf")).unwrap();
+    let contents: Vec<String> = doc
+        .get_pages()
+        .values()
+        .map(|&id| String::from_utf8_lossy(&pdf_editor::content::page_content_bytes(&doc, id).unwrap()).into_owned())
+        .collect();
+    assert!(contents[0].contains("LEFTPAGE line 19") && !contents[0].contains("RIGHTPAGE"));
+    assert!(contents[1].contains("RIGHTPAGE") && !contents[1].contains("LEFTPAGE"));
+}
+
 #[test]
 fn merged_sources_keep_page_order() {
     let f = Fixture::new();
