@@ -80,30 +80,6 @@ pub fn wrap_jpeg(e: EncodedImage) -> EncodedImage {
     }
 }
 
-/// Rewrites a JPEG as progressive with optimized Huffman tables, without
-/// touching its coefficients: same pixels, usually a smaller file.
-pub fn repack_jpeg(data: &[u8]) -> Result<Vec<u8>> {
-    use zenjpeg::lossless::{OutputMode, RestructureConfig, restructure};
-    let config = RestructureConfig { output_mode: OutputMode::Progressive, ..Default::default() };
-    restructure(data, &config, Unstoppable).map_err(|e| anyhow!("JPEG repack: {e}"))
-}
-
-/// True when the JPEG frame is progressive (SOF2).
-pub fn is_progressive_jpeg(data: &[u8]) -> bool {
-    let mut i = 2;
-    while i + 4 <= data.len() && data[i] == 0xFF {
-        let marker = data[i + 1];
-        if marker == 0xC2 {
-            return true;
-        }
-        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC || marker == 0xDA {
-            return false;
-        }
-        i += 2 + u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-    }
-    false
-}
-
 /// Estimates the libjpeg quality setting from the luma quantization table.
 pub fn jpeg_quality(data: &[u8]) -> Option<u8> {
     const STD_LUMA: [u32; 64] = [
@@ -291,8 +267,6 @@ mod tests {
         let back = decode_jpeg(&data, 3).unwrap();
         assert_eq!((back.width, back.height), (r.width, r.height));
         assert!(jpeg_quality(&data).is_some());
-        let repacked = repack_jpeg(&data).unwrap();
-        assert_eq!(decode_jpeg(&repacked, 3).unwrap().data, back.data);
     }
 
     #[test]

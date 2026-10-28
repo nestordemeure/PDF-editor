@@ -8,8 +8,7 @@ fn main() -> anyhow::Result<()> {
         let jpeg = pdf_editor::pdfimage::jpeg_data(pdf_editor::pdfimage::image_stream(&source.doc, id)?, &info)?;
         match pdf_editor::jpeggray::luma_only(&jpeg) {
             Ok(g) => {
-                let p = pdf_editor::encode::repack_jpeg(&g).map(|v| v.len()).unwrap_or(0);
-                println!("page {}: original {} baseline gray {} progressive gray {}", i + 1, jpeg.len(), g.len(), p);
+                println!("page {}: original {} gray {}", i + 1, jpeg.len(), g.len());
             }
             Err(e) => println!("page {}: {e}", i + 1),
         }

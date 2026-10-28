@@ -135,6 +135,20 @@ fn write_document(sources: &[Arc<Source>], pages: &[Page], options: &SaveOptions
                 }
             }
         }
+        // Where each image is drawn largest: its lowest resolution on a page.
+        let mut shown_ppi: HashMap<(usize, ObjectId), f64> = HashMap::new();
+        for &i in &preserved {
+            let page = &pages[i];
+            let Ok(content) = &sources[page.source].pages[page.index].content else { continue };
+            for placed in &content.images {
+                let (Some(id), Ok(stream)) = (placed.id, sources[page.source].doc.get_object(placed.id.unwrap_or((0, 0))).and_then(Object::as_stream)) else { continue };
+                let Ok(width) = stream.dict.get(b"Width").and_then(Object::as_i64) else { continue };
+                let extent = (placed.ctm.a * placed.ctm.a + placed.ctm.b * placed.ctm.b).sqrt();
+                let ppi = width as f64 * 72.0 / extent.max(1e-6);
+                let entry = shown_ppi.entry((page.source, id)).or_insert(ppi);
+                *entry = entry.min(ppi);
+            }
+        }
         progress(0, total, "Recompressing images of text pages");
         let replaced: Vec<((usize, ObjectId), EncodedImage)> = pool.install(|| {
             images
@@ -143,7 +157,7 @@ fn write_document(sources: &[Arc<Source>], pages: &[Page], options: &SaveOptions
                     if cancel.load(Ordering::Relaxed) {
                         bail!("cancelled");
                     }
-                    let image = pipeline::recompress_preserved_image(&sources[s], id, options.compression)
+                    let image = pipeline::recompress_preserved_image(&sources[s], id, options.compression, shown_ppi.get(&(s, id)).copied())
                         .with_context(|| format!("image {id:?} of {}", sources[s].name))?;
                     Ok(image.map(|e| ((s, id), e)))
                 })
@@ -272,7 +286,7 @@ fn page_images(source: &Source, page_id: ObjectId) -> Vec<ObjectId> {
 /// rendering hints.
 fn replacement_dict(original: &Dictionary, encoded: &EncodedImage) -> Dictionary {
     let mut d = image_dict(encoded);
-    for key in [&b"ColorSpace"[..], b"Interpolate", b"Intent"] {
+    for key in [&b"ColorSpace"[..], b"Interpolate", b"Intent", b"SMask"] {
         if let Ok(v) = original.get(key) {
             if key == b"ColorSpace" && encoded.channels == 1 && encoded.bits_per_component == 1 {
                 continue;

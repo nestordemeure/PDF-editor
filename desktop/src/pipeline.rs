@@ -22,7 +22,7 @@ const MAX_RENDER_PIXELS: f64 = 50e6;
 pub enum PageRoute {
     /// Typeset page copied as PDF objects.
     Copied,
-    /// Original image stream reused (maybe losslessly repacked).
+    /// Original image stream reused (maybe wrapped in Flate).
     PassThrough,
     /// Original image decoded, processed and re-encoded.
     Reencoded,
@@ -345,8 +345,9 @@ fn acquire(
 }
 
 /// The luma channel of a YCbCr JPEG image as a grayscale JPEG, made from
-/// its coefficients (exact), unless it is more than 2% larger than the
-/// original (scans of gray paper carry almost no chroma).
+/// its coefficients (exact), unless it is more than 10% larger than the
+/// original: scans of gray paper carry almost no chroma, and the output is
+/// baseline where originals are often progressive.
 /// `None` when the image is not a YCbCr JPEG.
 fn exact_gray(source: &Source, id: ObjectId, info: &ImageInfo) -> Result<Option<EncodedImage>> {
     if !matches!(info.codec, ImageCodec::Jpeg | ImageCodec::FlateJpeg) || info.channels != 3 {
@@ -354,14 +355,9 @@ fn exact_gray(source: &Source, id: ObjectId, info: &ImageInfo) -> Result<Option<
     }
     let stream = pdfimage::image_stream(&source.doc, id)?;
     let jpeg = pdfimage::jpeg_data(stream, info)?;
-    let Ok(mut gray) = crate::jpeggray::luma_only(&jpeg) else { return Ok(None) };
-    if let Ok(progressive) = encode::repack_jpeg(&gray) {
-        if progressive.len() < gray.len() {
-            gray = progressive;
-        }
-    }
+    let Ok(gray) = crate::jpeggray::luma_only(&jpeg) else { return Ok(None) };
     let image = encode::wrap_jpeg(EncodedImage { width: info.width, height: info.height, channels: 1, bits_per_component: 8, filter: ImageFilter::Dct, data: gray });
-    Ok((image.data.len() * 100 <= info.encoded_len * 102).then_some(image))
+    Ok((image.data.len() * 100 <= info.encoded_len * 110).then_some(image))
 }
 
 /// Quality of a JPEG image XObject, `None` for other codecs.
@@ -390,19 +386,13 @@ fn ocr_layer(engine: &mut Engine, placed: Placed) -> Result<Vec<u8>> {
 }
 
 /// A strictly smaller lossless encoding of an image, if one exists: JPEGs
-/// repacked as progressive, Flate images refiltered, bilevel ones as JBIG2.
+/// wrapped in Flate, Flate images refiltered, bilevel ones as JBIG2.
 pub fn lossless_shrink(source: &Source, id: ObjectId, info: &ImageInfo) -> Result<Option<EncodedImage>> {
     let stream = pdfimage::image_stream(&source.doc, id)?;
     let candidate = match info.codec {
+        // The JPEG itself stays as it is; only a Flate layer may change.
         ImageCodec::Jpeg | ImageCodec::FlateJpeg => {
-            let jpeg = pdfimage::jpeg_data(stream, info)?;
-            // Progressive JPEGs already have optimized entropy coding.
-            let data = if encode::is_progressive_jpeg(&jpeg) {
-                jpeg.into_owned()
-            } else {
-                let repacked = encode::repack_jpeg(&jpeg)?;
-                if repacked.len() < jpeg.len() { repacked } else { jpeg.into_owned() }
-            };
+            let data = pdfimage::jpeg_data(stream, info)?.into_owned();
             let plain = EncodedImage { width: info.width, height: info.height, channels: info.channels, bits_per_component: 8, filter: ImageFilter::Dct, data };
             encode::wrap_jpeg(plain)
         }
@@ -413,12 +403,23 @@ pub fn lossless_shrink(source: &Source, id: ObjectId, info: &ImageInfo) -> Resul
 }
 
 /// Recompresses an image of a preserved page when that makes it smaller.
-pub fn recompress_preserved_image(source: &Source, id: ObjectId, compression: Compression) -> Result<Option<EncodedImage>> {
-    let Some(info) = pdfimage::inspect(&source.doc, id)? else { return Ok(None) };
+/// `shown_ppi` is its resolution where it is drawn largest; at compression
+/// levels, images far sharper than twice the level's resolution are
+/// downsampled. Images with a soft mask (graphics) stay lossless.
+pub fn recompress_preserved_image(source: &Source, id: ObjectId, compression: Compression, shown_ppi: Option<f64>) -> Result<Option<EncodedImage>> {
+    let Some(info) = pdfimage::inspect_with(&source.doc, id, true)? else { return Ok(None) };
     let Some(quality) = compression.jpeg_quality() else { return lossless_shrink(source, id, &info) };
+    let mut raster = pdfimage::decode(&source.doc, id, &info, false)?;
+    let target = 2.0 * compression.max_dpi(ColorMode::Color).unwrap_or(f64::INFINITY);
+    if let Some(ppi) = shown_ppi.filter(|&p| p > 1.5 * target && info.codec != ImageCodec::Flate1) {
+        let f = target / ppi;
+        let (w, h) = (((raster.width as f64 * f).round() as u32).max(1), ((raster.height as f64 * f).round() as u32).max(1));
+        raster = raster.resize(w, h)?;
+    }
     let candidate = match info.codec {
-        ImageCodec::Flate1 => encode::encode_jbig2(&pdfimage::decode(&source.doc, id, &info, false)?)?,
-        _ => encode::encode_jpeg(&pdfimage::decode(&source.doc, id, &info, false)?, quality)?,
+        ImageCodec::Flate1 => encode::encode_jbig2(&raster)?,
+        _ if info.has_smask || info.codec == ImageCodec::Flate8 && raster.width != info.width => encode::encode_flate_png(&raster),
+        _ => encode::encode_jpeg(&raster, quality)?,
     };
     if candidate.data.len() < info.encoded_len {
         return Ok(Some(candidate));

@@ -26,6 +26,8 @@ pub struct ImageInfo {
     pub codec: ImageCodec,
     /// Size of the encoded stream.
     pub encoded_len: usize,
+    /// Has a soft mask (kept as it is when the image is replaced).
+    pub has_smask: bool,
 }
 
 fn name<'a>(doc: &'a Document, dict: &'a Dictionary, key: &[u8]) -> Option<&'a [u8]> {
@@ -82,15 +84,21 @@ pub fn image_stream(doc: &Document, id: ObjectId) -> Result<&Stream> {
 
 /// Describes the image if this module can decode it exactly.
 pub fn inspect(doc: &Document, id: ObjectId) -> Result<Option<ImageInfo>> {
+    inspect_with(doc, id, false)
+}
+
+/// As `inspect`; with `allow_smask`, images with a soft mask qualify too
+/// (the mask is a separate image and stays valid when this one changes).
+pub fn inspect_with(doc: &Document, id: ObjectId, allow_smask: bool) -> Result<Option<ImageInfo>> {
     let stream = image_stream(doc, id)?;
     let dict = &stream.dict;
     if name(doc, dict, b"Subtype") != Some(b"Image") {
         bail!("XObject {id:?} is not an image");
     }
-    for key in [&b"SMask"[..], b"Mask", b"Decode", b"ImageMask"] {
-        if dict.has(key) && !matches!(dict.get_deref(key, doc), Ok(Object::Boolean(false)) | Ok(Object::Null)) {
-            return Ok(None);
-        }
+    let present = |key: &[u8]| dict.has(key) && !matches!(dict.get_deref(key, doc), Ok(Object::Boolean(false)) | Ok(Object::Null));
+    let has_smask = present(b"SMask");
+    if (has_smask && !allow_smask) || [&b"Mask"[..], b"Decode", b"ImageMask"].into_iter().any(present) {
+        return Ok(None);
     }
     let (Some(width), Some(height), Some(bpc)) =
         (int(doc, dict, b"Width"), int(doc, dict, b"Height"), int(doc, dict, b"BitsPerComponent"))
@@ -113,7 +121,7 @@ pub fn inspect(doc: &Document, id: ObjectId) -> Result<Option<ImageInfo>> {
     if matches!(codec, ImageCodec::Jpeg | ImageCodec::FlateJpeg) && dict.has(b"DecodeParms") {
         return Ok(None);
     }
-    Ok(Some(ImageInfo { width: width as u32, height: height as u32, channels, codec, encoded_len: stream.content.len() }))
+    Ok(Some(ImageInfo { width: width as u32, height: height as u32, channels, codec, encoded_len: stream.content.len(), has_smask }))
 }
 
 /// The JPEG file inside a JPEG image stream.

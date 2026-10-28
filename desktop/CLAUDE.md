@@ -25,7 +25,7 @@ cargo test --release
 | `src/pdfimage.rs` | Inspects and decodes image XObjects: JPEG, Flate 8-bit, Flate 1-bit, gray or RGB only |
 | `src/pixel.rs` | `Raster` and the pixel pipeline (`apply_pixel_ops`): shading removal, contrast, gray, Otsu, Sauvola |
 | `src/jpeggray.rs` | Exact grayscale: luma DCT coefficients of a YCbCr JPEG written as a one-channel JPEG (own baseline Huffman writer) |
-| `src/encode.rs` | zenjpeg encode, decode and lossless repack; JBIG2 (lossless generic); Flate with PNG predictors |
+| `src/encode.rs` | zenjpeg encode and decode, Flate wrapping of JPEGs; JBIG2 (lossless generic); Flate with PNG predictors |
 | `src/render.rs` | MuPDF rendering with per-thread documents |
 | `src/ocr.rs` | Tesseract C API (statically linked) and the invisible text layer |
 | `src/pipeline.rs` | One raster page to an output image and text layer; `preview` for the UI |
@@ -42,8 +42,8 @@ Dependency direction: `gui` → `save` → `pipeline` → `pixel`/`encode`/`rend
 
 
 - **Copied**: a text page with no pixel operations. The page objects are copied. The view becomes `/CropBox` and `/Rotate`, so split and rotation keep the text.
-- **PassThrough**: a scan page with no pixel operations, at "No compression" or when re-encoding is not smaller. The original image stream is reused. A lossless repack replaces it only when strictly smaller.
-- **ExactGray**: "No compression" + grayscale (no cleanup) on a YCbCr JPEG scan. The luma coefficients are kept as they are; accepted up to 2% above the original size.
+- **PassThrough**: a scan page with no pixel operations, at "No compression" or when re-encoding is not smaller. The original image stream is reused, wrapped in Flate when that saves 1%. Do not use zenjpeg's `restructure`: its output has stray bytes before scan markers (libjpeg warns "extraneous bytes").
+- **ExactGray**: "No compression" + grayscale (no cleanup) on a YCbCr JPEG scan. The luma coefficients are kept as they are; accepted up to 10% above the original size (it is baseline, originals are often progressive).
 - **Reencoded**: the scan image is decoded at its own resolution, cropped, downsampled to the level's DPI, processed and encoded.
 - **Rendered**: MuPDF renders the page at the resolution of its main image (the largest, if it covers half the page), else 300 DPI, capped at 50 Mpx; then as above. At "No compression" it uses that image's JPEG quality, so rendered scans do not grow.
 
