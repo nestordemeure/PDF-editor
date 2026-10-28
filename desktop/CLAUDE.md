@@ -24,6 +24,7 @@ cargo test --release
 | `src/content.rs` | Content stream walker (what a page paints, the scan image and its placement) and the byte-exact text blanker |
 | `src/pdfimage.rs` | Inspects and decodes image XObjects: JPEG, Flate 8-bit, Flate 1-bit, gray or RGB only |
 | `src/pixel.rs` | `Raster` and the pixel pipeline (`apply_pixel_ops`): shading removal, contrast, gray, Otsu, Sauvola |
+| `src/jpeggray.rs` | Exact grayscale: luma DCT coefficients of a YCbCr JPEG written as a one-channel JPEG (own baseline Huffman writer) |
 | `src/encode.rs` | zenjpeg encode, decode and lossless repack; JBIG2 (lossless generic); Flate with PNG predictors |
 | `src/render.rs` | MuPDF rendering with per-thread documents |
 | `src/ocr.rs` | Tesseract C API (statically linked) and the invisible text layer |
@@ -37,8 +38,12 @@ Dependency direction: `gui` → `save` → `pipeline` → `pixel`/`encode`/`rend
 
 ## Page routes at save
 
+`pipeline::plan` decides the intended route without decoding pixels; `pipeline::intended_route` exposes it (the GUI status bar shows the counts). Keep the decision there, not in callers.
+
+
 - **Copied**: a text page with no pixel operations. The page objects are copied. The view becomes `/CropBox` and `/Rotate`, so split and rotation keep the text.
 - **PassThrough**: a scan page with no pixel operations, at "No compression" or when re-encoding is not smaller. The original image stream is reused. A lossless repack replaces it only when strictly smaller.
+- **ExactGray**: "No compression" + grayscale (no cleanup) on a YCbCr JPEG scan. The luma coefficients are kept as they are; accepted up to 2% above the original size.
 - **Reencoded**: the scan image is decoded at its own resolution, cropped, downsampled to the level's DPI, processed and encoded.
 - **Rendered**: MuPDF renders the page at the resolution of its main image (the largest, if it covers half the page), else 300 DPI, capped at 50 Mpx; then as above. At "No compression" it uses that image's JPEG quality, so rendered scans do not grow.
 
