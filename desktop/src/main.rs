@@ -13,6 +13,7 @@ fn main() -> eframe::Result {
             .with_title("PDF Editor")
             .with_app_id("pdf-editor")
             .with_inner_size([1400.0, 900.0])
+            .with_maximized(true)
             .with_drag_and_drop(true),
         ..Default::default()
     };
