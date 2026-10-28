@@ -456,7 +456,7 @@ mod tests {
     fn sauvola_separates_text_on_uneven_paper() {
         let r = gray(300, 100, |x, y| if y % 20 < 3 && x % 7 < 3 { 30 } else { (100 + x / 3) as u8 });
         let out = binarize_sauvola(&r, 1.0);
-        assert_eq!(out.data[1 * 300 + 1], 0);
+        assert_eq!(out.data[300 + 1], 0);
         assert_eq!(out.data[10 * 300 + 250], 255);
         assert_eq!(out.data[10 * 300 + 5], 255);
     }

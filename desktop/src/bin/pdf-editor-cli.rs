@@ -140,11 +140,10 @@ fn main() -> Result<()> {
                 (true, TextArg::Strip) => PageKind::TextStripped,
             };
             let mut page = Page::new(s, i, kind);
-            if let Some(mode) = mode {
-                if kind == PageKind::Scan || args.mode.is_some() {
+            if let Some(mode) = mode
+                && (kind == PageKind::Scan || args.mode.is_some()) {
                     page.color = mode;
                 }
-            }
             page.remove_shading = args.remove_shading;
             page.enhance_contrast = args.enhance_contrast;
             for _ in 0..args.rotate % 4 {

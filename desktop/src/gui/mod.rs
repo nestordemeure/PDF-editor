@@ -165,11 +165,10 @@ impl App {
             self.pick_and_save();
         }
         if self.jobs.busy() {
-            if pressed(Modifiers::NONE, Key::Escape) {
-                if let Some(job) = &self.jobs.current {
+            if pressed(Modifiers::NONE, Key::Escape)
+                && let Some(job) = &self.jobs.current {
                     job.cancel();
                 }
-            }
             return;
         }
         if typing {
@@ -249,11 +248,10 @@ impl App {
     /// "Save plan" line: how many pages take each route.
     fn plan_summary(&mut self) -> String {
         let key = (self.doc.revision, self.compression);
-        if let Some((k, text)) = &self.plan {
-            if *k == key {
+        if let Some((k, text)) = &self.plan
+            && *k == key {
                 return text.clone();
             }
-        }
         let settings = pdf_editor::pipeline::Settings { compression: self.compression, ocr: false, max_dpi: None, jpeg_quality: None };
         let mut counts: Vec<(PageRoute, usize)> = Vec::new();
         let mut failed = None;
@@ -470,11 +468,10 @@ impl App {
                 } else if pos.y > clip.max.y - 40.0 {
                     ui.scroll_with_delta(Vec2::new(0.0, -12.0));
                 }
-                if drag_released {
-                    if let Some(t) = target {
+                if drag_released
+                    && let Some(t) = target {
                         self.doc.move_page(from, t);
                     }
-                }
                 ui.ctx().request_repaint();
             }
         });

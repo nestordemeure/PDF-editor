@@ -87,7 +87,7 @@ struct Layout {
 
 fn write_document(sources: &[Arc<Source>], pages: &[Page], options: &SaveOptions, path: &Path, progress: Progress, cancel: &AtomicBool) -> Result<SaveReport> {
     let mut w = PdfWriter::create(path)?;
-    let raster: Vec<usize> = (0..pages.len()).filter(|&i| pipeline::is_raster(&pages[i])).collect();
+    let raster: Vec<usize> = (0..pages.len()).filter(|&i| !pages[i].is_preserved()).collect();
     let ocr_language = options.ocr_language.clone().filter(|_| !raster.is_empty());
     if let Some(lang) = &ocr_language {
         ocr::ensure_languages(lang, &|message| progress(0, pages.len(), message))?;
@@ -122,7 +122,7 @@ fn write_document(sources: &[Arc<Source>], pages: &[Page], options: &SaveOptions
     };
 
     // Preserved pages: recompress their images in parallel, then copy.
-    let preserved: Vec<usize> = (0..pages.len()).filter(|&i| !pipeline::is_raster(&pages[i])).collect();
+    let preserved: Vec<usize> = (0..pages.len()).filter(|&i| pages[i].is_preserved()).collect();
     if !preserved.is_empty() {
         let mut images: Vec<(usize, ObjectId)> = Vec::new();
         let mut seen = HashSet::new();
@@ -335,12 +335,11 @@ fn write_preserved_page(w: &mut PdfWriter, copier: &mut Copier, source: &Source,
     let dict = source.doc.get_dictionary(sp.id)?;
     let mut out = copier.convert_page(w, dict);
     for key in [&b"MediaBox"[..], b"Resources"] {
-        if !out.has(key) {
-            if let Some(value) = inherited(&source.doc, sp.id, key) {
+        if !out.has(key)
+            && let Some(value) = inherited(&source.doc, sp.id, key) {
                 let converted = copier.convert(w, &value);
                 out.set(key.to_vec(), converted);
             }
-        }
     }
     // The view becomes a crop box and a rotation: text stays text.
     let crop = page.view.crop_in_display(sp.display_size).transform(sp.user_to_display.invert().context("degenerate page")?);

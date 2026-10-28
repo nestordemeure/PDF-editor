@@ -157,7 +157,7 @@ fn no_compression_keeps_original_images_byte_for_byte() {
     let source = Arc::new(Source::open(&f.path("scan.pdf")).unwrap());
     let mut pages = pages_of(0, &source, PageKind::Text);
     pages.iter_mut().for_each(|p| p.color = ColorMode::Color);
-    let report = run(&[source.clone()], &pages, Compression::None, None, &f.path("out.pdf"));
+    let report = run(std::slice::from_ref(&source), &pages, Compression::None, None, &f.path("out.pdf"));
     assert_eq!(route_count(&report, PageRoute::PassThrough), 3);
     let original = output_images(&f.path("scan.pdf"));
     let saved = output_images(&f.path("out.pdf"));
@@ -209,7 +209,7 @@ fn black_and_white_uses_clean_jbig2() {
     for mode in [ColorMode::BwFlat, ColorMode::BwAdaptive] {
         let mut pages = pages_of(0, &source, PageKind::Text);
         pages[0].color = mode;
-        run(&[source.clone()], &pages, Compression::None, None, &f.path("out.pdf"));
+        run(std::slice::from_ref(&source), &pages, Compression::None, None, &f.path("out.pdf"));
         let image = &output_images(&f.path("out.pdf"))[0];
         assert_eq!(image.dict.get(b"Filter").unwrap().as_name().unwrap(), b"JBIG2Decode");
         assert!(!image.content.windows(3).any(|w| w == [0xFF, 0xFF, 0xAC]));

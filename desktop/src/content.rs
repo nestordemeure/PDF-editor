@@ -190,12 +190,11 @@ impl Walker<'_> {
                 if depth >= MAX_FORM_DEPTH {
                     bail!("forms nested deeper than {MAX_FORM_DEPTH}");
                 }
-                if let Some(id) = id {
-                    if !self.visited_forms.insert(id) {
+                if let Some(id) = id
+                    && !self.visited_forms.insert(id) {
                         // Already analyzed; repeated forms paint the same kinds of things.
                         return Ok(());
                     }
-                }
                 let matrix = stream
                     .dict
                     .get(b"Matrix")

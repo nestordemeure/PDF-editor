@@ -8,7 +8,7 @@ use crate::ocr::{self, Engine};
 use crate::pdfimage::{self, ImageCodec, ImageInfo};
 use crate::pixel::{self, Raster};
 use crate::render;
-use crate::source::{Source, SourcePage};
+use crate::source::Source;
 use anyhow::{Context, Result, bail};
 use lopdf::ObjectId;
 
@@ -207,7 +207,7 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
         let image_ctm = unit_to_display.then(to_out);
         let ocr = |engine: Option<&mut Engine>| -> Result<Option<Vec<u8>>> {
             match engine {
-                Some(e) => Ok(Some(ocr_layer(e, acquire(source, sp, page, embedded, info, to_out, out_size, true)?.limit_ppi(WORK_PPI)?)?)),
+                Some(e) => Ok(Some(ocr_layer(e, acquire(source, page, embedded, info, true)?.limit_ppi(WORK_PPI)?)?)),
                 None => Ok(None),
             }
         };
@@ -220,16 +220,15 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
             return Ok(PageOutput { size: out_size, image: ImageOut::PassThrough { id, smaller }, image_ctm, text, route: PageRoute::PassThrough });
         }
         // Grayscale without re-encoding: keep the JPEG's luma channel.
-        if let (PageRoute::ExactGray, Some(info)) = (planned, info) {
-            if let Some(image) = exact_gray(source, id, &info)? {
+        if let (PageRoute::ExactGray, Some(info)) = (planned, info)
+            && let Some(image) = exact_gray(source, id, &info)? {
                 let text = ocr(engine)?;
                 return Ok(PageOutput { size: out_size, image: ImageOut::Derived { id, image }, image_ctm, text, route: PageRoute::ExactGray });
             }
-        }
     }
 
     let gray_only = page.color != ColorMode::Color;
-    let placed = acquire(source, sp, page, embedded, info, to_out, out_size, gray_only)?;
+    let placed = acquire(source, page, embedded, info, gray_only)?;
     let route = if info.is_some() { PageRoute::Reencoded } else { PageRoute::Rendered };
     let ops = page.pixel_ops();
     let target_ppi = settings.max_dpi(page.color);
@@ -282,8 +281,8 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
     };
 
     // Recompressing an untouched scan must pay for itself.
-    if let (Some((id, unit_to_display)), Some(info)) = (embedded, info) {
-        if ops_are_noop {
+    if let (Some((id, unit_to_display)), Some(info)) = (embedded, info)
+        && ops_are_noop {
             let share = (out_size.0 * out_size.1) / unit_to_display.then(to_out).det().abs().max(1e-9);
             if encoded.data.len() as f64 >= info.encoded_len as f64 * share.min(1.0) {
                 let smaller = lossless_shrink(source, id, &info)?;
@@ -296,21 +295,14 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
                 });
             }
         }
-    }
     Ok(PageOutput { size: out_size, image: ImageOut::Encoded(encoded), image_ctm, text, route })
 }
 
 /// The page's pixels, cropped to the output page.
-fn acquire(
-    source: &Source,
-    sp: &SourcePage,
-    page: &Page,
-    embedded: Option<(ObjectId, Matrix)>,
-    info: Option<ImageInfo>,
-    to_out: Matrix,
-    out_size: (f64, f64),
-    gray: bool,
-) -> Result<Placed> {
+fn acquire(source: &Source, page: &Page, embedded: Option<(ObjectId, Matrix)>, info: Option<ImageInfo>, gray: bool) -> Result<Placed> {
+    let sp = &source.pages[page.index];
+    let to_out = page.view.display_to_output(sp.display_size);
+    let out_size = page.view.output_size(sp.display_size);
     let placed = match (embedded, info) {
         (Some((id, unit_to_display)), Some(info)) => {
             let raster = pdfimage::decode(&source.doc, id, &info, gray)?;
@@ -425,11 +417,6 @@ pub fn recompress_preserved_image(source: &Source, id: ObjectId, compression: Co
         return Ok(Some(candidate));
     }
     lossless_shrink(source, id, &info)
-}
-
-/// True when the page goes through `process_page` rather than being copied.
-pub fn is_raster(page: &Page) -> bool {
-    !page.is_preserved()
 }
 
 pub fn color_tag(pages: &[Page]) -> &'static str {
