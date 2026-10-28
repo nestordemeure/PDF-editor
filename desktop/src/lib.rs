@@ -33,6 +33,15 @@ pub fn init_process() {
     unsafe { std::env::set_var("OMP_THREAD_LIMIT", "1") };
 }
 
+/// This app's data directory (`$XDG_DATA_HOME/pdf-editor`).
+#[cfg(feature = "native")]
+pub fn data_dir() -> std::path::PathBuf {
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"));
+    base.join("pdf-editor")
+}
+
 /// Peak resident memory of this process, in megabytes.
 #[cfg(feature = "native")]
 pub fn peak_rss_mb() -> u64 {

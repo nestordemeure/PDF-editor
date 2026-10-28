@@ -10,7 +10,7 @@ use jobs::{Event, Jobs, TextChoice};
 use pdf_editor::model::{ColorMode, Compression, PageKind};
 use pdf_editor::pipeline::PageRoute;
 use pdf_editor::save::{SaveOptions, default_file_name};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use thumbnails::{FULL_SCALE_DPI, Thumbnails};
 
@@ -85,7 +85,7 @@ impl App {
             zoom: None,
             anchor: None,
             dragging: None,
-            last_dir: None,
+            last_dir: initial_dir(),
             close_after_job: false,
             startup_frames: 40,
             plan: None,
@@ -101,9 +101,19 @@ impl App {
             return;
         }
         if let Some(dir) = paths[0].parent() {
-            self.last_dir = Some(dir.to_path_buf());
+            self.remember_dir(dir);
         }
         self.jobs.load(paths);
+    }
+
+    /// Makes `dir` the folder file dialogs open in, now and at the next start.
+    fn remember_dir(&mut self, dir: &Path) {
+        self.last_dir = Some(dir.to_path_buf());
+        let file = last_dir_file();
+        let written = file.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&file, dir.as_os_str().as_encoded_bytes()));
+        if let Err(e) = written {
+            self.status = format!("Could not remember the folder in {}: {e}", file.display());
+        }
     }
 
     fn pick_and_load(&mut self) {
@@ -127,6 +137,9 @@ impl App {
             dialog = dialog.set_directory(dir);
         }
         let Some(path) = dialog.save_file() else { return };
+        if let Some(dir) = path.parent() {
+            self.remember_dir(dir);
+        }
         let options = SaveOptions { compression: self.compression, ocr_language: self.ocr_language.clone(), threads: 0, max_dpi: None, jpeg_quality: None };
         self.status = "Saving...".into();
         self.jobs.save(self.doc.sources.clone(), pages, options, path);
@@ -633,6 +646,31 @@ impl App {
             }
         }
     }
+}
+
+fn last_dir_file() -> PathBuf {
+    pdf_editor::data_dir().join("last-folder")
+}
+
+/// The folder file dialogs open in at start: the last one used, else the
+/// Downloads folder.
+fn initial_dir() -> Option<PathBuf> {
+    let last = std::fs::read_to_string(last_dir_file()).ok().map(PathBuf::from);
+    last.filter(|d| d.is_dir()).or_else(|| downloads_dir().filter(|d| d.is_dir()))
+}
+
+/// `XDG_DOWNLOAD_DIR` from `user-dirs.dirs` (localized names), else `~/Downloads`.
+fn downloads_dir() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let config = std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home.join(".config"), PathBuf::from);
+    let configured = std::fs::read_to_string(config.join("user-dirs.dirs")).ok().and_then(|text| {
+        let value = text.lines().find_map(|l| l.trim().strip_prefix("XDG_DOWNLOAD_DIR="))?.trim_matches('"').to_owned();
+        Some(match value.strip_prefix("$HOME") {
+            Some(rest) => home.join(rest.trim_start_matches('/')),
+            None => PathBuf::from(value),
+        })
+    });
+    Some(configured.unwrap_or_else(|| home.join("Downloads")))
 }
 
 /// The web app's multi-language choice.

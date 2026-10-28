@@ -71,10 +71,7 @@ pub fn tessdata_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("TESSDATA_PREFIX") {
         return PathBuf::from(dir);
     }
-    let base = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"));
-    base.join("pdf-editor/tessdata")
+    crate::data_dir().join("tessdata")
 }
 
 fn model_file(lang: &str) -> String {
