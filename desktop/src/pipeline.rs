@@ -360,13 +360,14 @@ pub fn run_page_job(job: &PageJob, rendered: Option<Raster>) -> Result<PageOutpu
     if layers {
         let f = (job.settings.background_dpi(color) / work_ppi).min(1.0);
         let size = (((raster.width as f64 * f).round() as u32).max(1), ((raster.height as f64 * f).round() as u32).max(1));
-        // A bilevel mask below WORK_PPI has staircase edges, and its
-        // threshold takes the soft edge pixels for ink: draw it from the
-        // page enlarged to WORK_PPI.
-        let split = if work_ppi < 0.9 * WORK_PPI {
-            let k = WORK_PPI / work_ppi;
+        // A coarse bilevel mask has staircase edges, and its threshold
+        // takes the soft edge pixels for ink: draw it from the page
+        // enlarged to the level's text resolution.
+        let text_dpi = job.settings.compression.text_dpi();
+        let split = if work_ppi < 0.9 * text_dpi {
+            let k = text_dpi / work_ppi;
             let up = raster.resize((raster.width as f64 * k).round() as u32, (raster.height as f64 * k).round() as u32)?;
-            crate::mrc::separate(&up, 1.0, size)?
+            crate::mrc::separate(&up, text_dpi / 300.0, size)?
         } else {
             crate::mrc::separate(&raster, scale, size)?
         };

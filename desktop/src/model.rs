@@ -109,6 +109,16 @@ impl Compression {
         }
     }
 
+    /// Least resolution of the text layer in sharp-text modes: lower-
+    /// resolution scans are enlarged to it, sharper ones keep their own.
+    pub fn text_dpi(self) -> f64 {
+        match self {
+            Compression::None | Compression::Low => 300.0,
+            Compression::Medium => 240.0,
+            Compression::High => 200.0,
+        }
+    }
+
     /// JPEG quality for re-encoded pages; `None` keeps the source quality.
     pub fn jpeg_quality(self) -> Option<u8> {
         match self {
