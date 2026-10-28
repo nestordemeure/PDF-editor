@@ -129,7 +129,7 @@ pub fn apply_cleanup(raster: Raster, ops: PixelOps, scale: f64) -> Raster {
         r = remove_shading(&r, scale);
     }
     if ops.enhance_contrast {
-        enhance_contrast(&mut r);
+        enhance_contrast(&mut r, scale);
     }
     r
 }
@@ -266,35 +266,86 @@ fn box_blur_line(src: &[u8], dst: &mut [u8], radius: usize) {
     }
 }
 
-/// Stretches the luma range between the 0.5th and 99.5th percentiles to
-/// full range. Percentiles, unlike min and max, ignore dust and specks.
-fn enhance_contrast(r: &mut Raster) {
+/// Maps the ink median to black and the paper median to white. Only
+/// pixels near paper count: a max filter erases text strokes, so where it
+/// stays dark the area is a scanner border or a cover, not text. Otsu's
+/// threshold then splits ink from paper. Where ink and paper do not
+/// separate well (cloth, pictures), it stretches between the 0.5th and
+/// 99.5th percentiles instead.
+fn enhance_contrast(r: &mut Raster, scale: f64) {
     let gray = r.to_gray();
+    let (w, h) = (gray.width as usize, gray.height as usize);
     let mut hist = [0u64; 256];
     for &v in &gray.data {
         hist[v as usize] += 1;
     }
-    let total = gray.data.len() as u64;
-    let tail = total / 200;
-    let percentile = |from_top: bool| {
-        let mut acc = 0;
-        for i in 0..256 {
-            let bin = if from_top { 255 - i } else { i };
-            acc += hist[bin];
-            if acc > tail {
-                return bin as i32;
-            }
+    let (lo, hi) = percentile_range(&hist, 0.005);
+    let local_paper = max_filter(&gray.data, w, h, scaled_radius(10.0, scale, 1));
+    let (lo, hi) = match ink_range(&gray.data, &local_paper) {
+        Some((ink_lo, ink_hi, separation)) => {
+            let t = ((separation - 0.6) / 0.1).clamp(0.0, 1.0);
+            (lo + t * (ink_lo - lo), hi + t * (ink_hi - hi))
         }
-        if from_top { 0 } else { 255 }
+        None => (lo, hi),
     };
-    let (lo, hi) = (percentile(false), percentile(true));
-    if hi - lo < 16 {
+    if hi - lo < 16.0 {
         return;
     }
-    let lut: Vec<u8> = (0..256).map(|v| (((v - lo) * 255 + (hi - lo) / 2) / (hi - lo)).clamp(0, 255) as u8).collect();
+    let lut: Vec<u8> = (0..256).map(|v| ((v as f64 - lo) * 255.0 / (hi - lo)).round().clamp(0.0, 255.0) as u8).collect();
     for v in r.data.iter_mut() {
         *v = lut[*v as usize];
     }
+}
+
+/// Levels below and above which `tail` of the pixels lie.
+fn percentile_range(hist: &[u64; 256], tail: f64) -> (f64, f64) {
+    let limit = (hist.iter().sum::<u64>() as f64 * tail) as u64;
+    let find = |bins: &mut dyn Iterator<Item = usize>| {
+        let mut acc = 0;
+        for i in bins {
+            acc += hist[i];
+            if acc > limit {
+                return Some(i);
+            }
+        }
+        None
+    };
+    let lo = find(&mut (0..256)).unwrap_or(0);
+    let hi = find(&mut (0..256).rev()).unwrap_or(255);
+    (lo as f64, hi as f64)
+}
+
+/// Ink median, paper median and Otsu's separation (0 to 1) of the pixels
+/// near paper.
+fn ink_range(gray: &[u8], local_paper: &[u8]) -> Option<(f64, f64, f64)> {
+    // Largest gain: on pages without ink, it limits the paper noise.
+    const MIN_RANGE: usize = 102;
+    let mut paper_hist = [0u64; 256];
+    for &v in local_paper {
+        paper_hist[v as usize] += 1;
+    }
+    let paper_level = median(&paper_hist)?;
+    let mut hist = [0u64; 256];
+    for (&v, &p) in gray.iter().zip(local_paper) {
+        if p as usize * 5 >= paper_level * 3 {
+            hist[v as usize] += 1;
+        }
+    }
+    let (t, separation) = otsu_split(&hist);
+    let t = t as usize;
+    let ink = median(&hist[..=t])?;
+    let paper = median(&hist[t + 1..])? + t + 1;
+    Some((ink.min(paper.saturating_sub(MIN_RANGE)) as f64, paper as f64, separation))
+}
+
+/// Index of the median of a histogram, `None` when it is empty.
+fn median(hist: &[u64]) -> Option<usize> {
+    let total: u64 = hist.iter().sum();
+    let mut acc = 0;
+    hist.iter().position(|&n| {
+        acc += n;
+        total > 0 && acc * 2 >= total
+    })
 }
 
 /// Global threshold that best separates ink from paper.
@@ -303,7 +354,13 @@ pub fn otsu_threshold(gray: &Raster) -> u8 {
     for &v in &gray.data {
         hist[v as usize] += 1;
     }
-    let total = gray.data.len() as f64;
+    otsu_split(&hist).0
+}
+
+/// Otsu's threshold and its separation: the between-class variance over
+/// the total variance.
+fn otsu_split(hist: &[u64; 256]) -> (u8, f64) {
+    let total = hist.iter().sum::<u64>() as f64;
     let sum: f64 = (0..256).map(|i| i as f64 * hist[i] as f64).sum();
     let (mut sum_b, mut w_b, mut best, mut threshold) = (0.0, 0.0, 0.0, 128u8);
     for i in 0..256 {
@@ -324,7 +381,10 @@ pub fn otsu_threshold(gray: &Raster) -> u8 {
             threshold = i as u8;
         }
     }
-    threshold
+    let mean = sum / total;
+    let variance: f64 = (0..256).map(|i| (i as f64 - mean).powi(2) * hist[i] as f64).sum::<f64>() / total;
+    let separation = if variance > 0.0 { best / (total * total * variance) } else { 0.0 };
+    (threshold, separation)
 }
 
 /// Otsu refined to the midpoint of the ink and paper means (isodata).
@@ -450,6 +510,25 @@ mod tests {
         let ink = out.data[97 * 200 + 100];
         assert!(bg > 245, "background {bg}");
         assert!(ink < 60, "ink {ink}");
+    }
+
+    #[test]
+    fn contrast_darkens_gray_text_despite_a_black_border() {
+        // Paper 230, text strokes 130, and a black border at the left.
+        let r = gray(200, 100, |x, y| if x < 10 { 0 } else if y % 10 < 2 && x % 7 < 3 { 130 } else { 230 });
+        let mut out = r.clone();
+        enhance_contrast(&mut out, 1.0);
+        let at = |x: u32, y: u32| out.data[(y * 200 + x) as usize];
+        assert!(at(14, 0) < 10, "text becomes black");
+        assert_eq!(at(100, 5), 255, "paper becomes white");
+    }
+
+    #[test]
+    fn contrast_does_not_blow_up_a_blank_page() {
+        let r = gray(100, 100, |x, y| if (x * 7 + y * 13) % 50 == 0 { 240 } else { 250 });
+        let mut out = r.clone();
+        enhance_contrast(&mut out, 1.0);
+        assert!(out.data.iter().all(|&v| v >= 225), "noise stays light");
     }
 
     #[test]
