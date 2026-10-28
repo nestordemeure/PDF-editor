@@ -1,14 +1,11 @@
 /**
- * Page rendering pipeline, shared by thumbnails and the exporter.
+ * PDF.js rendering: page thumbnails, and full renders for the engine.
  *
- * applyOperationsToCanvas is the single canonical pipeline:
- * geometric ops (rotate/split) -> remove shading -> enhance contrast -> color mode.
- * Binarization runs last so shading removal / contrast work on real gray values.
- * Because thumbnails and the save path use the same pipeline, previews match output.
+ * Thumbnails go through the engine's preview, the same view and pixel
+ * operations as the save, so previews match the output.
  */
 
-import { applyPixelPipeline, needsPixelWork } from "./imagePixelOps.js";
-import { OperationType } from "./pageModel.js";
+import { previewPage } from "./engine.js";
 
 // Default thumbnail width in pixels
 const THUMBNAIL_WIDTH = 300;
@@ -47,53 +44,6 @@ export async function getBasePageCanvas({ pdfDoc, sourceId, pageIndex, maxWidth 
 }
 
 /**
- * True when the page is "classic" (typeset text, worth preserving as-is).
- *
- * Pages without extractable text are scans. Pages *with* text can still be
- * scans: OCR tools add an invisible text layer over the page image. Those
- * are detected by measuring how much of the page area is covered by painted
- * images — a page that is essentially one full-page image is a scan and
- * should go through the raster pipeline (compression, cleanup, re-OCR).
- */
-export async function detectClassicPage(pdfDoc, pageIndex) {
-  const page = await pdfDoc.getPage(pageIndex + 1);
-  const textContent = await page.getTextContent();
-  const hasText = textContent.items.some(item => item.str && item.str.trim().length > 0);
-  if (!hasText) return false;
-
-  // Sum the page-area fraction painted with images. Images are drawn as a
-  // unit square through the CTM, so each one's area is |det(CTM)|; the
-  // determinant composes multiplicatively, which lets us track a single
-  // scalar through save/restore/transform instead of full matrices.
-  const OPS = window.pdfjsLib.OPS;
-  const opList = await page.getOperatorList();
-  const [x1, y1, x2, y2] = page.view;
-  const pageArea = Math.abs((x2 - x1) * (y2 - y1));
-
-  let det = 1;
-  const stack = [];
-  let imageArea = 0;
-  for (let i = 0; i < opList.fnArray.length; i++) {
-    const fn = opList.fnArray[i];
-    if (fn === OPS.save) {
-      stack.push(det);
-    } else if (fn === OPS.restore) {
-      if (stack.length) det = stack.pop();
-    } else if (fn === OPS.transform) {
-      const [a, b, c, d] = opList.argsArray[i];
-      det *= a * d - b * c;
-    } else if (
-      fn === OPS.paintImageXObject ||
-      fn === OPS.paintInlineImageXObject ||
-      fn === OPS.paintImageMaskXObject
-    ) {
-      imageArea += Math.abs(det);
-    }
-  }
-  return imageArea < 0.9 * pageArea;
-}
-
-/**
  * Renders a PDF page to a canvas sized to fit maxWidth
  * @returns {Promise<{canvas: HTMLCanvasElement, pageSizePts: {width: number, height: number}}>}
  */
@@ -110,6 +60,9 @@ async function renderPdfPageThumbnail({ pdfDoc, pageIndex, maxWidth = THUMBNAIL_
 
   const ctx = canvas.getContext("2d");
   await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise;
+  // PDF.js keeps the decoded images of a page until told otherwise: a
+  // scan is tens of megabytes.
+  page.cleanup();
 
   return {
     canvas,
@@ -137,92 +90,49 @@ export function rotateCanvas90(canvas) {
 }
 
 /**
- * Crops a canvas to left or right half
+ * Applies a page's view and pixel operations to a render of its source
+ * page. Consumes the input canvas; returns a new one.
  */
-export function cropCanvasHalf(canvas, side) {
-  const mid = Math.floor(canvas.width / 2);
-  const cropped = document.createElement("canvas");
-
-  if (side === "left") {
-    cropped.width = mid;
-    cropped.height = canvas.height;
-    cropped.getContext("2d").drawImage(canvas, 0, 0, mid, canvas.height, 0, 0, mid, canvas.height);
-  } else {
-    cropped.width = canvas.width - mid;
-    cropped.height = canvas.height;
-    cropped.getContext("2d").drawImage(canvas, mid, 0, canvas.width - mid, canvas.height, 0, 0, canvas.width - mid, canvas.height);
-  }
-
-  return cropped;
+export async function applyOperationsToCanvas(canvas, page, record) {
+  const imageData = canvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, canvas.width, canvas.height);
+  releaseCanvas(canvas);
+  const result = await previewPage(imageData, page, record);
+  const out = document.createElement("canvas");
+  out.width = result.width;
+  out.height = result.height;
+  out.getContext("2d").putImageData(result, 0, 0);
+  return out;
 }
 
 /**
- * Applies a page's operations to a canvas. Consumes the input canvas
- * (intermediates are released); returns the resulting canvas.
- * @param {HTMLCanvasElement} canvas - Source canvas (treated as owned/throwaway)
- * @param {Array} operations - Operations to apply
- * @param {Object} [options]
- * @param {number} [options.shadingScale] - Resolution scale for shading removal
- *   (canvas resolution relative to a 300 DPI render of the page)
- * @returns {HTMLCanvasElement}
+ * Updates a page's thumbnail after its operations change (replaces
+ * page.thumbnail). `record` is the page's source record.
  */
-export function applyOperationsToCanvas(canvas, operations, { shadingScale = 1 } = {}) {
-  const current = applyGeometricOpsToCanvas(canvas, operations);
-
-  if (needsPixelWork(operations)) {
-    const ctx = current.getContext("2d", { willReadFrequently: true });
-    const imageData = ctx.getImageData(0, 0, current.width, current.height);
-    applyPixelPipeline(imageData, operations, { shadingScale });
-    ctx.putImageData(imageData, 0, 0);
-  }
-
-  return current;
-}
-
-/**
- * Applies only the geometric operations (rotate/split), in the order they
- * were applied. Consumes the input canvas.
- */
-export function applyGeometricOpsToCanvas(canvas, operations) {
-  let current = canvas;
-
-  for (const op of operations) {
-    if (op.type === OperationType.ROTATE) {
-      const times = ((op.degrees / 90) % 4 + 4) % 4;
-      for (let i = 0; i < times; i++) {
-        const rotated = rotateCanvas90(current);
-        releaseCanvas(current);
-        current = rotated;
-      }
-    } else if (op.type === OperationType.SPLIT) {
-      const cropped = cropCanvasHalf(current, op.side);
-      releaseCanvas(current);
-      current = cropped;
-    }
-  }
-
-  return current;
-}
-
-/**
- * Generates a thumbnail for a page with its operations applied
- */
-async function generateThumbnail({ pdfDoc, page, maxWidth = THUMBNAIL_WIDTH }) {
-  const { canvas, pageSizePts } = await getBasePageCanvas({
-    pdfDoc,
+export async function updatePageThumbnail({ record, page, maxWidth = THUMBNAIL_WIDTH }) {
+  const { canvas } = await getBasePageCanvas({
+    pdfDoc: record.pdfDoc,
     sourceId: page.sourceId,
     pageIndex: page.sourcePageIndex,
     maxWidth,
   });
-
-  // Thumbnail resolution relative to a 300 DPI render of the source page
-  const shadingScale = canvas.width / ((pageSizePts.width / 72) * 300);
-  return applyOperationsToCanvas(canvas, page.operations, { shadingScale });
+  page.thumbnail = await applyOperationsToCanvas(canvas, page, record);
 }
 
 /**
- * Updates a page's thumbnail after operations change (mutates page.thumbnail)
+ * Renders a source page (display space) at `pixelsPerPoint`, as the engine
+ * asks for pages without a decodable scan image.
+ * @returns {Promise<{rgba: Uint8Array, width: number, height: number}>}
  */
-export async function updatePageThumbnail({ pdfDoc, page, maxWidth = THUMBNAIL_WIDTH }) {
-  page.thumbnail = await generateThumbnail({ pdfDoc, page, maxWidth });
+export async function renderPageRgba(pdfDoc, pageIndex, pixelsPerPoint) {
+  const page = await pdfDoc.getPage(pageIndex + 1);
+  const viewport = page.getViewport({ scale: pixelsPerPoint });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(viewport.width));
+  canvas.height = Math.max(1, Math.round(viewport.height));
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  page.cleanup();
+  const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  releaseCanvas(canvas);
+  return { rgba: new Uint8Array(data.buffer, data.byteOffset, data.byteLength), width, height };
 }

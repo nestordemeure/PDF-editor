@@ -1,0 +1,35 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -207,6 +207,9 @@
+     "decode",
+ ]
+ 
++[dependencies.web-time]
++version = "1"
++
+ [dependencies.anyhow]
+ version = "1.0"
+ 
+--- a/src/encode/document/symbol/planning.rs
++++ b/src/encode/document/symbol/planning.rs
+@@ -32,7 +32,8 @@
+ use rayon::prelude::*;
+ use rustc_hash::{FxHashMap, FxHashSet};
+ use std::collections::{HashMap, HashSet};
+-use std::time::{Duration, Instant};
++use std::time::Duration;
++use web_time::Instant;
+ 
+ impl<'a> Jbig2Encoder<'a> {
+     pub(crate) fn plan_document(&mut self, include_header: bool) -> Result<PlannedDocument> {
+--- a/src/encode/document.rs
++++ b/src/encode/document.rs
+@@ -78,7 +78,7 @@
+ use std::hash::{Hash, Hasher};
+ use std::time::Duration;
+ #[cfg(feature = "symboldict")]
+-use std::time::Instant;
++use web_time::Instant;
+ 
+ /// A key type for hashing bitmaps efficiently
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -10,10 +10,10 @@
 
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284/build/pdf.min.mjs";
 import { createPage, cloneOperations, getEffectiveColorMode } from "./pageModel.js";
-import { getBasePageCanvas, updatePageThumbnail, applyOperationsToCanvas, clearBaseThumbnailCache, detectClassicPage } from "./pageRenderer.js";
+import { getBasePageCanvas, updatePageThumbnail, applyOperationsToCanvas, clearBaseThumbnailCache } from "./pageRenderer.js";
 import { applyColorModeToSelection, rotateSelection, splitSelection, deleteSelection, removeShadingSelection, enhanceContrastSelection, forEachConcurrent, THUMBNAIL_CONCURRENCY } from "./pageCommands.js";
 import { savePdf } from "./saveManager.js";
-import { tryDecryptPdf, stripTextFromPdf } from "./classicPdf.js";
+import { library } from "./engine.js";
 
 // DOM Elements
 const fileInput = document.getElementById("fileInput");
@@ -36,12 +36,8 @@ const previewCanvas = document.getElementById("previewCanvas");
 const previewLabel = document.getElementById("previewLabel");
 const ocrLang = document.getElementById("ocrLang");
 
-// PDF.js setup (saveManager reads window.pdfjsLib for its bytes fallback)
+// PDF.js renders thumbnails and the pages the engine cannot decode itself
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284/build/pdf.worker.min.mjs";
-window.pdfjsLib = pdfjsLib;
-
-// pdf-lib
-const { PDFDocument } = window.PDFLib;
 
 // State
 let pages = [];
@@ -49,10 +45,10 @@ let history = [];
 let future = [];
 let sortable = null;
 let activePreviewId = null;
-let scribeModule = null;
 
-// Source PDF storage
-const sourcePdfs = new Map(); // sourceId -> { bytes, pdfDoc, name }
+// Source PDFs: sourceId -> { engineId, pdfDoc, name, pages }, where pages
+// holds the engine's description of each page ({ width, height, text, ppiFactor })
+const sourcePdfs = new Map();
 let sourceIdCounter = 0;
 
 const sourceFileNames = new Set();
@@ -117,9 +113,9 @@ function createSourceId() {
   return `source_${Date.now()}_${sourceIdCounter}`;
 }
 
-function getPdfDocForPage(page) {
+function getRecordForPage(page) {
   if (!page || !page.sourceId) return null;
-  return sourcePdfs.get(page.sourceId)?.pdfDoc || null;
+  return sourcePdfs.get(page.sourceId) || null;
 }
 
 function sanitizeFilenamePart(value, maxLength = 40) {
@@ -254,9 +250,9 @@ async function restoreStateFromSnapshot(snapshot) {
     setStatus("Regenerating thumbnails...");
     let done = 0;
     await forEachConcurrent(pagesNeedingThumbnails, THUMBNAIL_CONCURRENCY, async page => {
-      const pdfDoc = getPdfDocForPage(page);
-      if (!pdfDoc) return;
-      await updatePageThumbnail({ pdfDoc, page });
+      const record = getRecordForPage(page);
+      if (!record) return;
+      await updatePageThumbnail({ record, page });
       done += 1;
       setProgress(done, pagesNeedingThumbnails.length);
     });
@@ -494,14 +490,6 @@ function askTextPagesChoice({ name, count }) {
   });
 }
 
-async function loadScribe() {
-  if (scribeModule) return scribeModule;
-  const moduleUrl = new URL("../vendor/scribe.js", import.meta.url);
-  const module = await import(moduleUrl.href);
-  scribeModule = module.default || module;
-  return scribeModule;
-}
-
 async function handleFiles(files) {
   if (!files.length) return;
 
@@ -519,33 +507,20 @@ async function handleFiles(files) {
       pushHistory();
     }
 
-    // Load all PDFs first to get counts
+    // The engine reads each file (classification, decryption); PDF.js
+    // renders it
     const sources = [];
     for (const file of pdfFiles) {
-      let bytes = await file.arrayBuffer();
-      let pdfDoc = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
-      const sourceId = createSourceId();
+      const bytes = new Uint8Array(await file.arrayBuffer());
       const baseName = getFileStem(file.name) || "file";
-
-      // getPermissions() is null for unencrypted files. pdf-lib cannot
-      // decrypt, so strip the encryption with qpdf (WASM, loaded lazily);
-      // if that fails the source's pages go through the raster pipeline.
-      let encrypted = (await pdfDoc.getPermissions()) !== null;
-      if (encrypted) {
-        setStatus(`Decrypting ${file.name}...`);
-        const decrypted = await tryDecryptPdf(bytes);
-        if (decrypted) {
-          await pdfDoc.destroy();
-          bytes = decrypted;
-          pdfDoc = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
-          encrypted = false;
-        }
-      }
-
-      sourcePdfs.set(sourceId, { bytes, pdfDoc, name: baseName, encrypted });
+      setStatus(`Reading ${file.name}...`);
+      const loaded = await library("load", baseName, bytes.slice());
+      const pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+      const sourceId = createSourceId();
+      const record = { engineId: loaded.id, pdfDoc, name: baseName, pages: loaded.pages };
+      sourcePdfs.set(sourceId, record);
       if (baseName) sourceFileNames.add(baseName);
-
-      sources.push({ sourceId, pdfDoc, numPages: pdfDoc.numPages, name: baseName, encrypted });
+      sources.push({ sourceId, record, numPages: loaded.pages.length, name: baseName });
     }
 
     // Create page objects with thumbnails (a few PDF.js renders in flight)
@@ -557,22 +532,15 @@ async function handleFiles(files) {
     let loadedPages = 0;
     const throttledYield = makeThrottledYield();
 
-    let classicInEncrypted = 0;
     await forEachConcurrent(pageSpecs, THUMBNAIL_CONCURRENCY, async ({ source, pageIndex }, specIndex) => {
+      const { record } = source;
       const { canvas: thumbnail, pageSizePts } = await getBasePageCanvas({
-        pdfDoc: source.pdfDoc,
+        pdfDoc: record.pdfDoc,
         sourceId: source.sourceId,
         pageIndex,
       });
 
-      // Encrypted sources can't be passed through (pdf-lib cannot decrypt),
-      // so their text pages are treated like scans; the alert below explains.
-      let isClassic = await detectClassicPage(source.pdfDoc, pageIndex);
-      if (isClassic && source.encrypted) {
-        classicInEncrypted += 1;
-        isClassic = false;
-      }
-
+      const isClassic = record.pages[pageIndex].text;
       const page = createPage({
         sourceId: source.sourceId,
         sourcePageIndex: pageIndex,
@@ -586,10 +554,9 @@ async function handleFiles(files) {
         // (text, fonts and vectors preserved) as long as they stay unedited
         page.thumbnail = thumbnail;
       } else {
-        // Apply default grayscale mode to the already-rendered canvas
-        // (avoids rendering every page twice on load)
+        // Scans default to grayscale; apply it to the render already made
         page.operations.push({ type: "colorMode", mode: "gray" });
-        page.thumbnail = applyOperationsToCanvas(thumbnail, page.operations);
+        page.thumbnail = await applyOperationsToCanvas(thumbnail, page, record);
       }
 
       newPages[specIndex] = page;
@@ -603,6 +570,7 @@ async function handleFiles(files) {
     // born-digital PDFs), strip the text for good (junk OCR layers), or
     // rasterize them into scans (cleanup + recompression + fresh OCR).
     for (const source of sources) {
+      const { record } = source;
       const classicPages = newPages.filter(page => page.sourceId === source.sourceId && page.isClassic);
       if (classicPages.length === 0) continue;
 
@@ -612,46 +580,32 @@ async function handleFiles(files) {
         for (const page of classicPages) {
           page.isClassic = false;
           page.operations.push({ type: "colorMode", mode: "gray" });
-          // Thumbnail is still the base render here (classic pages get no
-          // default operations), so the scan default can be applied directly
-          if (page.thumbnail) page.thumbnail = applyOperationsToCanvas(page.thumbnail, page.operations);
+          // The thumbnail is still the base render (text pages get no
+          // default operations), so the scan default applies directly
+          page.thumbnail = await applyOperationsToCanvas(page.thumbnail, page, record);
         }
       } else if (choice === "strip") {
-        // Rewrite the source itself so thumbnails, preview and save all see
-        // the stripped document; pages stay preserved (pass-through) at save
+        // The engine strips its copy; PDF.js reloads the stripped file so
+        // thumbnails, preview and save all see the same document
         setStatus(`Stripping text from ${source.name}...`);
-        const stripped = await stripTextFromPdf(
-          sourcePdfs.get(source.sourceId).bytes,
-          classicPages.map(page => page.sourcePageIndex),
-          PDFDocument
-        );
-        if (stripped) {
-          const record = sourcePdfs.get(source.sourceId);
-          await record.pdfDoc.destroy();
-          record.bytes = stripped;
-          record.pdfDoc = await pdfjsLib.getDocument({ data: stripped.slice(0) }).promise;
-          source.pdfDoc = record.pdfDoc;
-          clearBaseThumbnailCache();
-          for (const page of classicPages) page.textStripped = true;
-          setStatus(`Updating thumbnails for ${source.name}...`);
-          await forEachConcurrent(classicPages, THUMBNAIL_CONCURRENCY, async page => {
-            await updatePageThumbnail({ pdfDoc: record.pdfDoc, page });
-          });
-        } else {
-          alert(`Could not strip the text from "${source.name}"; keeping it instead.`);
+        const skipped = await library("strip_text", record.engineId, classicPages.map(page => page.sourcePageIndex));
+        const stripped = await library("rewritten", record.engineId);
+        await record.pdfDoc.destroy();
+        record.pdfDoc = await pdfjsLib.getDocument({ data: stripped }).promise;
+        clearBaseThumbnailCache();
+        for (const page of classicPages) page.textStripped = true;
+        setStatus(`Updating thumbnails for ${source.name}...`);
+        await forEachConcurrent(classicPages, THUMBNAIL_CONCURRENCY, async page => {
+          await updatePageThumbnail({ record, page });
+        });
+        if (skipped > 0) {
+          alert(`"${source.name}": ${skipped} content stream${skipped === 1 ? "" : "s"} could not be processed (inline images); their text remains.`);
         }
       }
     }
 
     pages = pages.concat(newPages);
     if (history.length === 0) pushHistory();
-
-    if (classicInEncrypted > 0) {
-      alert(
-        `This PDF is encrypted and could not be decrypted: ` +
-        `${classicInEncrypted} text page${classicInEncrypted === 1 ? "" : "s"} will be rasterized (converted to images) on save.`
-      );
-    }
 
     setStatus(`Loaded ${totalPages} page${totalPages === 1 ? "" : "s"} (${pages.length} total).`);
     endProgress();
@@ -712,7 +666,7 @@ colorModeSelect.addEventListener("change", () => runExclusive(async () => {
   setProgress(0, selected.length);
   setStatus(`Applying color mode to ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await applyColorModeToSelection({ pages, mode, getPdfDocForPage, setProgress, setStatus, yieldToUi: makeThrottledYield() });
+  await applyColorModeToSelection({ pages, mode, getRecordForPage, setProgress, setStatus, yieldToUi: makeThrottledYield() });
 
   renderPages();
   endProgress();
@@ -727,7 +681,7 @@ splitBtn.addEventListener("click", () => runExclusive(async () => {
   setProgress(0, pages.length);
   setStatus("Splitting pages...");
 
-  const nextPages = await splitSelection({ pages, setProgress, setStatus, yieldToUi: makeThrottledYield() });
+  const nextPages = await splitSelection({ pages, getRecordForPage, setProgress, setStatus, yieldToUi: makeThrottledYield() });
   pages = nextPages;
 
   renderPages();
@@ -759,7 +713,7 @@ removeShadingBtn.addEventListener("click", () => runExclusive(async () => {
   setProgress(0, selected.length);
   setStatus(`Removing shading from ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await removeShadingSelection({ pages, getPdfDocForPage, setProgress, setStatus, yieldToUi: makeThrottledYield() });
+  await removeShadingSelection({ pages, getRecordForPage, setProgress, setStatus, yieldToUi: makeThrottledYield() });
 
   renderPages();
   endProgress();
@@ -774,7 +728,7 @@ enhanceContrastBtn.addEventListener("click", () => runExclusive(async () => {
   setProgress(0, selected.length);
   setStatus(`Enhancing contrast for ${selected.length} page${selected.length === 1 ? "" : "s"}...`);
 
-  await enhanceContrastSelection({ pages, getPdfDocForPage, setProgress, setStatus, yieldToUi: makeThrottledYield() });
+  await enhanceContrastSelection({ pages, getRecordForPage, setProgress, setStatus, yieldToUi: makeThrottledYield() });
 
   renderPages();
   endProgress();
@@ -828,33 +782,20 @@ saveBtn.addEventListener("click", () => runExclusive(async () => {
     const compression = compressionLevel.value;
     const lang = ocrLang.value;
 
-    // Load scribe.js if OCR is needed
-    let scribe = null;
-    if (lang && lang !== "none") {
-      setStatus("Loading OCR engine...");
-      scribe = await loadScribe();
-    }
-
-    // Save using the worker pool
-    const { pdfBytes, ocrUsed } = await savePdf({
-      pdfSources: sourcePdfs,
+    const { blob, report } = await savePdf({
+      sources: sourcePdfs,
       pages,
-      options: {
-        compression,
-        ocrLang: lang,
-        scribeModule: scribe,
-        PDFDocument,
-      },
+      compression,
+      ocrLang: lang,
       onProgress: (value, max) => setProgress(value, max),
       onStatus: message => setStatus(message),
     });
 
     // Download the result
-    const blob = new Blob([pdfBytes], { type: "application/pdf" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    const outputName = buildOutputFilename({ compression, ocrUsed });
+    const outputName = buildOutputFilename({ compression, ocrUsed: lang !== "none" });
     link.download = outputName;
     document.body.appendChild(link);
     link.click();
@@ -862,7 +803,10 @@ saveBtn.addEventListener("click", () => runExclusive(async () => {
     URL.revokeObjectURL(url);
 
     endProgress();
-    setStatus(`Saved ${outputName}`);
+    const kept = report.hidden_text_kept_pages > 0
+      ? ` The hidden text of ${report.hidden_text_kept_pages} split text page${report.hidden_text_kept_pages === 1 ? "" : "s"} could not be removed.`
+      : "";
+    setStatus(`Saved ${outputName} (${(blob.size / 1e6).toFixed(1)} MB).${kept}`);
   } catch (error) {
     console.error("Save failed:", error);
     setStatus(`Save failed: ${error.message}`);

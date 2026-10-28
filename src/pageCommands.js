@@ -2,10 +2,10 @@
  * Tools for page operations.
  *
  * These functions modify the operation lists on pages and update thumbnails.
- * Geometric operations (rotate/split) transform the existing thumbnail in
- * place (exact and fast). Pixel operations (color mode, shading, contrast)
- * regenerate the thumbnail through the shared pipeline so the preview always
- * matches what the save will produce.
+ * Rotation turns the existing thumbnail (pixel operations do not depend on
+ * orientation). Everything else regenerates it through the engine's
+ * preview, so the preview always matches what the save will produce:
+ * contrast and adaptive B&W depend on what the crop keeps.
  */
 
 import {
@@ -17,36 +17,45 @@ import {
   createEnhanceContrastOp,
   cloneOperations,
 } from "./pageModel.js";
-import { updatePageThumbnail, rotateCanvas90, cropCanvasHalf } from "./pageRenderer.js";
+import { updatePageThumbnail, rotateCanvas90 } from "./pageRenderer.js";
 
 // Concurrent PDF.js renders during thumbnail regeneration
 export const THUMBNAIL_CONCURRENCY = 3;
 
 /**
- * Runs fn over items with a bounded number in flight
+ * Runs fn over items with a bounded number in flight. After a failure no
+ * new item starts; the first error is thrown once the others settle.
  */
 export async function forEachConcurrent(items, limit, fn) {
   let next = 0;
+  let failed = false;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
+    while (next < items.length && !failed) {
       const index = next++;
-      await fn(items[index], index);
+      try {
+        await fn(items[index], index);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
     }
   });
-  await Promise.all(workers);
+  const results = await Promise.allSettled(workers);
+  const rejected = results.find(r => r.status === "rejected");
+  if (rejected) throw rejected.reason;
 }
 
 /**
  * Regenerates thumbnails for pages concurrently, reporting progress
  */
-async function regenerateThumbnails(selected, { getPdfDocForPage, setProgress, setStatus, yieldToUi, statusLabel }) {
+export async function regenerateThumbnails(selected, { getRecordForPage, setProgress, setStatus, yieldToUi, statusLabel }) {
   let done = 0;
   await forEachConcurrent(selected, THUMBNAIL_CONCURRENCY, async page => {
-    const pdfDoc = getPdfDocForPage ? getPdfDocForPage(page) : null;
-    if (!pdfDoc) {
+    const record = getRecordForPage(page);
+    if (!record) {
       throw new Error("Missing PDF source for page thumbnail.");
     }
-    await updatePageThumbnail({ pdfDoc, page });
+    await updatePageThumbnail({ record, page });
     done += 1;
     setProgress(done, selected.length);
     setStatus(`${statusLabel} ${done}/${selected.length}`);
@@ -85,7 +94,7 @@ export async function rotateSelection({ pages, setProgress, setStatus, yieldToUi
 /**
  * Applies a color mode ('color', 'gray', 'bw', 'bw-otsu') to selected pages
  */
-export async function applyColorModeToSelection({ pages, mode, getPdfDocForPage, setProgress, setStatus, yieldToUi }) {
+export async function applyColorModeToSelection({ pages, mode, getRecordForPage, setProgress, setStatus, yieldToUi }) {
   const selected = pages.filter(page => page.selected);
 
   for (const page of selected) {
@@ -96,17 +105,16 @@ export async function applyColorModeToSelection({ pages, mode, getPdfDocForPage,
     }
   }
 
-  await regenerateThumbnails(selected, { getPdfDocForPage, setProgress, setStatus, yieldToUi, statusLabel: "Applying color mode" });
+  await regenerateThumbnails(selected, { getRecordForPage, setProgress, setStatus, yieldToUi, statusLabel: "Applying color mode" });
 }
 
 /**
  * Splits selected pages into left and right halves
  * @returns {Promise<Array>} New pages array with splits applied
  */
-export async function splitSelection({ pages, setProgress, setStatus, yieldToUi }) {
+export async function splitSelection({ pages, getRecordForPage, setProgress, setStatus, yieldToUi }) {
   const nextPages = [];
-  const selectedCount = pages.filter(p => p.selected).length;
-  let processed = 0;
+  const halves = [];
 
   for (let i = 0; i < pages.length; i++) {
     const page = pages[i];
@@ -122,7 +130,7 @@ export async function splitSelection({ pages, setProgress, setStatus, yieldToUi 
         sourcePageIndex: page.sourcePageIndex,
         pageSizePts: { ...halfSize },
         operations: [...cloneOperations(page.operations), createSplitOp("left")],
-        thumbnail: page.thumbnail ? cropCanvasHalf(page.thumbnail, "left") : null,
+        thumbnail: null,
         selected: false,
         isClassic: page.isClassic,
         textStripped: page.textStripped,
@@ -134,7 +142,7 @@ export async function splitSelection({ pages, setProgress, setStatus, yieldToUi 
         sourcePageIndex: page.sourcePageIndex,
         pageSizePts: { ...halfSize },
         operations: [...cloneOperations(page.operations), createSplitOp("right")],
-        thumbnail: page.thumbnail ? cropCanvasHalf(page.thumbnail, "right") : null,
+        thumbnail: null,
         selected: false,
         isClassic: page.isClassic,
         textStripped: page.textStripped,
@@ -142,14 +150,11 @@ export async function splitSelection({ pages, setProgress, setStatus, yieldToUi 
 
       nextPages.push(leftPage);
       nextPages.push(rightPage);
-
-      processed++;
-      setProgress(processed, selectedCount);
-      setStatus(`Splitting ${processed}/${selectedCount}`);
-      await yieldToUi();
+      halves.push(leftPage, rightPage);
     }
   }
 
+  await regenerateThumbnails(halves, { getRecordForPage, setProgress, setStatus, yieldToUi, statusLabel: "Splitting" });
   return nextPages;
 }
 
@@ -171,25 +176,25 @@ export async function deleteSelection({ pages, setProgress, setStatus, yieldToUi
 /**
  * Removes shading from selected pages
  */
-export async function removeShadingSelection({ pages, getPdfDocForPage, setProgress, setStatus, yieldToUi }) {
+export async function removeShadingSelection({ pages, getRecordForPage, setProgress, setStatus, yieldToUi }) {
   const selected = pages.filter(page => page.selected && !page.operations.some(op => op.type === "removeShading"));
 
   for (const page of selected) {
     page.operations.push(createRemoveShadingOp());
   }
 
-  await regenerateThumbnails(selected, { getPdfDocForPage, setProgress, setStatus, yieldToUi, statusLabel: "Removing shading" });
+  await regenerateThumbnails(selected, { getRecordForPage, setProgress, setStatus, yieldToUi, statusLabel: "Removing shading" });
 }
 
 /**
  * Enhances contrast on selected pages
  */
-export async function enhanceContrastSelection({ pages, getPdfDocForPage, setProgress, setStatus, yieldToUi }) {
+export async function enhanceContrastSelection({ pages, getRecordForPage, setProgress, setStatus, yieldToUi }) {
   const selected = pages.filter(page => page.selected && !page.operations.some(op => op.type === "enhanceContrast"));
 
   for (const page of selected) {
     page.operations.push(createEnhanceContrastOp());
   }
 
-  await regenerateThumbnails(selected, { getPdfDocForPage, setProgress, setStatus, yieldToUi, statusLabel: "Enhancing contrast" });
+  await regenerateThumbnails(selected, { getRecordForPage, setProgress, setStatus, yieldToUi, statusLabel: "Enhancing contrast" });
 }

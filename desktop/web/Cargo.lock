@@ -803,8 +803,6 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "jbig2enc-rust"
 version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "824bf24bc5cf66f4146355d665cf492fd16b534459266ca85c52bf85c11c83c8"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -817,6 +815,7 @@ dependencies = [
  "once_cell",
  "rustc-hash",
  "thiserror",
+ "web-time",
  "wide",
 ]
 
@@ -1543,6 +1542,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef64dbcc55df09c7e5a46182d181c2cfa3e925f3da937ea764728b4bbb9dcbf"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "web-time"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]

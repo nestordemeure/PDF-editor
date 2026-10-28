@@ -23,3 +23,7 @@ wasm-bindgen = "=0.2.127"
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# Made by build.sh.
+[patch.crates-io]
+jbig2enc-rust = { path = "patched/jbig2enc-rust-0.5.4" }

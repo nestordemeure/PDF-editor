@@ -4,7 +4,7 @@ In-browser cleanup tool for scanned books. Everything runs client-side: no serve
 
 Open the [GitHub Pages version](https://nestordemeure.github.io/PDF-editor/), or run `./serve.sh` and open <http://localhost:8000> for local testing.
 
-A native Linux version, faster and with smaller output, lives in [`desktop/`](desktop/README.md).
+It runs the same engine as the native Linux version in [`desktop/`](desktop/README.md), compiled to WebAssembly, so both make the same files. The native version is faster (about three times with OCR) and handles bigger books.
 
 ## What it does
 
@@ -12,9 +12,10 @@ A native Linux version, faster and with smaller output, lives in [`desktop/`](de
 - Reorder pages by dragging; select pages to edit (or select all).
 - Rotate 90°, split double pages down the middle, delete pages.
 - Clean up scans: grayscale, black & white (flat or adaptive), shadow removal, contrast enhancement.
+- Keep typeset pages as text (even when rotated or split), strip their text, or rasterize them. Encrypted files that open without a password work too.
 - Undo / redo.
-- Optional OCR that adds an invisible, selectable text layer.
-- Export a compact PDF: B&W pages are CCITT G4 compressed, grayscale/color pages use MozJPEG, with four compression levels from lossless to high.
+- Optional OCR with Tesseract that adds an invisible, selectable text layer.
+- Export a compact PDF: at "No compression" scans pass through untouched and grayscale keeps the JPEG's own data; B&W pages use lossless JBIG2; other pages use JPEG, at three compression levels.
 
 ## Usage
 
@@ -23,3 +24,7 @@ A native Linux version, faster and with smaller output, lives in [`desktop/`](de
 3. Pick a compression level and OCR language, then **Save PDF**.
 
 A typical book scan: select all, B&W (adaptive), Remove Shadows, high compression, OCR — a few hundred pages come out at ~25 KB per page with selectable text.
+
+## Development
+
+The page has no build step. The engine in `src/engine/` is built from the Rust code with `desktop/web/build.sh`, which needs Rust with the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` at the version in `desktop/web/Cargo.toml`.
