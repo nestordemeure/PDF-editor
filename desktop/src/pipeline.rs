@@ -57,7 +57,18 @@ pub struct PageOutput {
     pub ocr: Option<OcrInput>,
     /// Text layer operators.
     pub text: Option<Vec<u8>>,
+    /// Sharp text drawn over `image` (text and image layers).
+    pub mask: Option<MaskLayer>,
     pub route: PageRoute,
+}
+
+/// Ink colors painted through a bilevel mask (JBIG2).
+#[derive(Serialize, Deserialize)]
+pub struct MaskLayer {
+    pub mask: EncodedImage,
+    pub foreground: EncodedImage,
+    /// Maps the unit square of both to output page space.
+    pub ctm: Matrix,
 }
 
 /// An upright gray image for OCR, and where its pixels land on the page.
@@ -159,6 +170,12 @@ impl Settings {
 
     fn jpeg_quality(&self) -> Option<u8> {
         self.jpeg_quality.or(self.compression.jpeg_quality())
+    }
+
+    /// Resolution of the image layer under the text layer: the level's,
+    /// so pictures look as in a gray or color page.
+    fn background_dpi(&self, mode: ColorMode) -> f64 {
+        self.max_dpi.or(self.compression.max_dpi(mode)).unwrap_or(200.0)
     }
 
     /// True when sources keep their resolution and quality.
@@ -287,7 +304,7 @@ pub fn run_page_job(job: &PageJob, rendered: Option<Raster>) -> Result<PageOutpu
     let mut rendered = rendered;
     let ocr = job.settings.ocr;
     let color = job.ops.color;
-    let out = |image, image_ctm, ocr, route| PageOutput { size: job.out_size, image, image_ctm, ocr, text: None, route };
+    let out = |image, image_ctm, ocr, route| PageOutput { size: job.out_size, image, image_ctm, ocr, text: None, mask: None, route };
 
     if let Some((id, unit_to_display)) = job.embedded {
         let image_ctm = unit_to_display.then(job.to_out);
@@ -307,10 +324,12 @@ pub fn run_page_job(job: &PageJob, rendered: Option<Raster>) -> Result<PageOutpu
             }
     }
 
-    let gray_only = color != ColorMode::Color;
+    let gray_only = color.image_mode() != ColorMode::Color;
     let placed = acquire(job, rendered.take(), gray_only)?;
     let route = if job.image.is_some() { PageRoute::Reencoded } else { PageRoute::Rendered };
-    let target_ppi = job.settings.max_dpi(color);
+    // Text layers keep text at up to the working resolution.
+    let layers = color.is_layered();
+    let target_ppi = if layers { WORK_PPI } else { job.settings.max_dpi(color) };
 
     // OCR reads the cleaned gray image at up to WORK_PPI; the output uses
     // the level's resolution. When both are the same, clean up once.
@@ -320,7 +339,8 @@ pub fn run_page_job(job: &PageJob, rendered: Option<Raster>) -> Result<PageOutpu
         _ => None,
     };
     let work = placed.limit_ppi(target_ppi)?;
-    let scale = work.ppi() / 300.0;
+    let work_ppi = work.ppi();
+    let scale = work_ppi / 300.0;
     let cleaned = pixel::apply_cleanup(work.raster, job.ops, scale);
     let ocr = match (ocr, ocr_placed) {
         (false, _) => None,
@@ -332,6 +352,18 @@ pub fn run_page_job(job: &PageJob, rendered: Option<Raster>) -> Result<PageOutpu
     };
     let image_ctm = unit_ctm(cleaned.width, cleaned.height, work.px_to_out);
     let raster = pixel::apply_color_mode(cleaned, color, scale);
+
+    if layers {
+        let f = (job.settings.background_dpi(color) / work_ppi).min(1.0);
+        let size = (((raster.width as f64 * f).round() as u32).max(1), ((raster.height as f64 * f).round() as u32).max(1));
+        let split = crate::mrc::separate(&raster, scale, size)?;
+        let quality = job.settings.jpeg_quality().or(job.source_quality).unwrap_or(75);
+        let background = encode::encode_jpeg(&split.background, quality)?;
+        let mask = MaskLayer { mask: encode::encode_jbig2(&split.mask)?, foreground: encode::encode_jpeg(&split.foreground, quality)?, ctm: image_ctm };
+        let mut output = out(ImageOut::Encoded(background), image_ctm, ocr, route);
+        output.mask = Some(mask);
+        return Ok(output);
+    }
 
     let encoded = if color.is_bilevel() {
         encode::encode_jbig2(&raster)?
@@ -495,7 +527,7 @@ pub fn color_tag(pages: &[Page]) -> &'static str {
     for p in pages {
         *counts.entry(p.color).or_insert(0usize) += 1;
     }
-    let best = [ColorMode::Gray, ColorMode::BwFlat, ColorMode::BwAdaptive, ColorMode::Color]
+    let best = [ColorMode::Gray, ColorMode::GrayText, ColorMode::BwFlat, ColorMode::BwAdaptive, ColorMode::ColorText, ColorMode::Color]
         .into_iter()
         .max_by_key(|m| counts.get(m).copied().unwrap_or(0))
         .unwrap_or(ColorMode::Color);
@@ -510,5 +542,11 @@ pub fn preview(base: &Raster, page: &Page, display_size: (f64, f64), ppi_factor:
     let cropped = base.crop((c.x0 * w).round() as u32, (c.y0 * h).round() as u32, (c.x1 * w).round() as u32, (c.y1 * h).round() as u32);
     let turned = cropped.rotate_cw(page.view.quarter_turns);
     let ppi = base.width as f64 * 72.0 / display_size.0 * ppi_factor;
-    pixel::apply_pixel_ops(turned, page.pixel_ops(), ppi / 300.0)
+    let scale = ppi / 300.0;
+    let out = pixel::apply_pixel_ops(turned, page.pixel_ops(), scale);
+    // Previews are coarser than any image layer: the background keeps their resolution.
+    match page.color.is_layered() {
+        true => crate::mrc::separate(&out, scale, (out.width, out.height)).map_or(out, |l| crate::mrc::composite(&l)),
+        false => out,
+    }
 }

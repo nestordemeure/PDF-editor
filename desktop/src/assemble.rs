@@ -404,20 +404,32 @@ fn write_raster_page(
     };
 
     let (pw, ph) = output.size;
-    let m = output.image_ctm;
     let f = format_number;
-    let mut content = format!(
-        "q 0 0 {} {} re W n {} {} {} {} {} {} cm /Im0 Do Q\n",
-        f(pw),
-        f(ph),
-        f(m.a),
-        f(m.b),
-        f(m.c),
-        f(m.d),
-        f(m.e),
-        f(m.f)
-    )
-    .into_bytes();
+    let draw = |m: crate::geometry::Matrix, name: &str| {
+        format!("q 0 0 {} {} re W n {} {} {} {} {} {} cm /{name} Do Q\n", f(pw), f(ph), f(m.a), f(m.b), f(m.c), f(m.d), f(m.e), f(m.f))
+    };
+    let mut content = draw(output.image_ctm, "Im0").into_bytes();
+    let mask_id = match &output.mask {
+        Some(layer) => {
+            let (mask, fg) = (w.alloc(), w.alloc());
+            let e = &layer.mask;
+            let mut d = Dictionary::new();
+            d.set("Type", Object::Name(b"XObject".to_vec()));
+            d.set("Subtype", Object::Name(b"Image".to_vec()));
+            d.set("Width", Object::Integer(e.width as i64));
+            d.set("Height", Object::Integer(e.height as i64));
+            d.set("ImageMask", Object::Boolean(true));
+            d.set("BitsPerComponent", Object::Integer(1));
+            d.set("Filter", Object::Name(b"JBIG2Decode".to_vec()));
+            w.write_stream(mask, d, e.data.clone())?;
+            let mut d = image_dict(&layer.foreground);
+            d.set("Mask", reference(mask));
+            w.write_stream(fg, d, layer.foreground.data.clone())?;
+            content.extend_from_slice(draw(layer.ctm, "Im1").as_bytes());
+            Some(fg)
+        }
+        None => None,
+    };
     if let Some(text) = &output.text {
         content.extend_from_slice(text);
     }
@@ -428,6 +440,9 @@ fn write_raster_page(
 
     let mut xobjects = Dictionary::new();
     xobjects.set("Im0", reference(image_id));
+    if let Some(id) = mask_id {
+        xobjects.set("Im1", reference(id));
+    }
     let mut resources = Dictionary::new();
     resources.set("XObject", Object::Dictionary(xobjects));
     if let (Some(font), Some(_)) = (layout.font, &output.text) {

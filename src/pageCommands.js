@@ -92,7 +92,7 @@ export async function rotateSelection({ pages, setProgress, setStatus, yieldToUi
 }
 
 /**
- * Applies a color mode ('color', 'gray', 'bw', 'bw-otsu') to selected pages
+ * Applies a color mode ('color', 'color-text', 'gray', 'gray-text', 'bw', 'bw-otsu') to selected pages
  */
 export async function applyColorModeToSelection({ pages, mode, getRecordForPage, setProgress, setStatus, yieldToUi }) {
   const selected = pages.filter(page => page.selected);

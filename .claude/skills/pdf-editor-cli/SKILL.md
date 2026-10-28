@@ -21,6 +21,7 @@ $B --info IN.pdf                                   # classification per page: TE
 $B IN.pdf [MORE.pdf ...] -o OUT.pdf                # defaults: --compression high, scans gray, --ocr eng
 $B IN.pdf -o OUT.pdf --compression none --mode color --ocr none   # pass-through
 $B IN.pdf -o OUT.pdf --mode bw-adaptive --remove-shading --enhance-contrast
+$B IN.pdf -o OUT.pdf --mode gray-text              # sharp text layer over gray images (color-text: color images)
 $B IN.pdf -o OUT.pdf --split --rotate 1            # split every page, then a quarter turn
 $B IN.pdf -o OUT.pdf --text strip                  # keep | strip | rasterize text pages
 $B IN.pdf -o OUT.pdf --threads 8                   # 0 = one per logical CPU

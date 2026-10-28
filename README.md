@@ -12,10 +12,11 @@ It runs the same engine as the native Linux version in [`desktop/`](desktop/READ
 - Reorder pages by dragging; select pages to edit (or select all).
 - Rotate 90°, split double pages down the middle, delete pages.
 - Clean up scans: grayscale, black & white (flat or adaptive), shadow removal, contrast enhancement.
+- "Sharp text" color modes keep text at the scan's full resolution over low-resolution pictures: sharper text than grayscale in about half the size.
 - Keep typeset pages as text (even when rotated or split), strip their text, or rasterize them. Encrypted files that open without a password work too.
 - Undo / redo.
 - Optional OCR with Tesseract that adds an invisible, selectable text layer.
-- Export a compact PDF: at "No compression" scans pass through untouched and grayscale keeps the JPEG's own data; B&W pages use lossless JBIG2; other pages use JPEG, at three compression levels.
+- Export a compact PDF: at "No compression" scans pass through untouched and grayscale keeps the JPEG's own data; B&W pages and text layers use lossless JBIG2; other pages use JPEG, at three compression levels.
 
 ## Usage
 

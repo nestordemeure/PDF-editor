@@ -10,6 +10,7 @@ pub mod encode;
 pub mod geometry;
 pub mod jpeggray;
 pub mod model;
+pub mod mrc;
 #[cfg(feature = "native")]
 pub mod ocr;
 pub mod pdfimage;

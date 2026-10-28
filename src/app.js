@@ -145,19 +145,21 @@ function modeLabel(mode) {
   if (mode === "bw") return "bwprog";
   if (mode === "bw-otsu") return "bw";
   if (mode === "gray") return "gray";
+  if (mode === "gray-text") return "graytext";
+  if (mode === "color-text") return "text";
   return "";
 }
 
 function mostCommonModeLabel() {
   if (pages.length === 0) return "color";
-  const counts = { "": 0, gray: 0, bw: 0, bwprog: 0 };
+  const counts = { "": 0, gray: 0, graytext: 0, bw: 0, bwprog: 0, text: 0 };
   for (const page of pages) {
     const mode = getEffectiveColorMode(page.operations);
     const label = modeLabel(mode);
     counts[label] = (counts[label] || 0) + 1;
   }
   let best = "";
-  for (const label of ["gray", "bw", "bwprog", ""]) {
+  for (const label of ["gray", "graytext", "bw", "bwprog", "text", ""]) {
     if (counts[label] > (counts[best] || 0)) best = label;
   }
   return best;

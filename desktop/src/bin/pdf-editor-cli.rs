@@ -21,7 +21,11 @@ enum CompressionArg {
 #[derive(Clone, Copy, ValueEnum)]
 enum ModeArg {
     Color,
+    /// Sharp text over color image layers.
+    ColorText,
     Gray,
+    /// Sharp text over gray image layers.
+    GrayText,
     Bw,
     BwAdaptive,
 }
@@ -67,7 +71,8 @@ struct Args {
     /// Tesseract language(s), e.g. eng or eng+fra; "none" disables OCR.
     #[arg(long, default_value = "eng")]
     ocr: String,
-    /// Maximum output resolution, instead of the compression level's.
+    /// Maximum output resolution, instead of the compression level's (for
+    /// sharp-text modes, of the image layers).
     #[arg(long)]
     dpi: Option<f64>,
     /// JPEG quality (libjpeg scale, 1-100), instead of the level's.
@@ -115,7 +120,9 @@ fn main() -> Result<()> {
 
     let mode = args.mode.map(|m| match m {
         ModeArg::Color => ColorMode::Color,
+        ModeArg::ColorText => ColorMode::ColorText,
         ModeArg::Gray => ColorMode::Gray,
+        ModeArg::GrayText => ColorMode::GrayText,
         ModeArg::Bw => ColorMode::BwFlat,
         ModeArg::BwAdaptive => ColorMode::BwAdaptive,
     });

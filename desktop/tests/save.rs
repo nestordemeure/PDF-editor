@@ -217,6 +217,30 @@ fn black_and_white_uses_clean_jbig2() {
 }
 
 #[test]
+fn sharp_text_modes_paint_ink_through_a_full_resolution_jbig2_mask() {
+    let f = Fixture::new();
+    scan_pdf(&f.path("scan.pdf"), 1, &scan_raster(1275, 1650));
+    let source = Arc::new(Source::open(&f.path("scan.pdf")).unwrap());
+    for (mode, channels) in [(ColorMode::GrayText, 1), (ColorMode::ColorText, 3)] {
+        let mut pages = pages_of(0, &source, PageKind::Text);
+        pages[0].color = mode;
+        run(std::slice::from_ref(&source), &pages, Compression::High, None, &f.path("out.pdf"));
+        let doc = Document::load(f.path("out.pdf")).unwrap();
+        let images = output_images(&f.path("out.pdf"));
+        assert_eq!(images.len(), 2, "background and ink");
+        let ink = images.iter().find(|i| i.dict.has(b"Mask")).expect("ink image with a mask");
+        let mask = doc.get_object(ink.dict.get(b"Mask").unwrap().as_reference().unwrap()).unwrap().as_stream().unwrap();
+        assert_eq!(mask.dict.get(b"ImageMask").unwrap(), &Object::Boolean(true));
+        assert_eq!(mask.dict.get(b"Filter").unwrap().as_name().unwrap(), b"JBIG2Decode");
+        assert_eq!(mask.dict.get(b"Width").unwrap().as_i64().unwrap(), 1275, "text keeps the scan's resolution");
+        let background = images.iter().find(|i| !i.dict.has(b"Mask")).unwrap();
+        assert_eq!(background.dict.get(b"Width").unwrap().as_i64().unwrap(), 1020, "the level's resolution: 8.5 in at 120 DPI");
+        let space = if channels == 1 { &b"DeviceGray"[..] } else { b"DeviceRGB" };
+        assert_eq!(background.dict.get(b"ColorSpace").unwrap().as_name().unwrap(), space);
+    }
+}
+
+#[test]
 fn split_and_rotated_text_pages_stay_text() {
     let f = Fixture::new();
     text_pdf(&f.path("text.pdf"), 1, "Typeset text", 24.0);

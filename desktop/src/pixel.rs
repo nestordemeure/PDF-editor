@@ -124,7 +124,7 @@ pub fn apply_pixel_ops(raster: Raster, ops: PixelOps, scale: f64) -> Raster {
 /// Gray conversion (unless the mode keeps color), shading removal, then
 /// contrast: everything before thresholding.
 pub fn apply_cleanup(raster: Raster, ops: PixelOps, scale: f64) -> Raster {
-    let mut r = if ops.color == ColorMode::Color { raster } else { raster.to_gray() };
+    let mut r = if ops.color.image_mode() == ColorMode::Color { raster } else { raster.to_gray() };
     if ops.remove_shading {
         r = remove_shading(&r, scale);
     }
@@ -137,8 +137,8 @@ pub fn apply_cleanup(raster: Raster, ops: PixelOps, scale: f64) -> Raster {
 /// The color half of the pipeline, last so thresholds see real gray values.
 pub fn apply_color_mode(r: Raster, mode: ColorMode, scale: f64) -> Raster {
     match mode {
-        ColorMode::Color => r,
-        ColorMode::Gray => r.to_gray(),
+        ColorMode::Color | ColorMode::ColorText => r,
+        ColorMode::Gray | ColorMode::GrayText => r.to_gray(),
         ColorMode::BwFlat => binarize_otsu(&r.to_gray()),
         ColorMode::BwAdaptive => binarize_sauvola(&r.to_gray(), scale),
     }

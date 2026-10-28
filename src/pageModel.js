@@ -77,7 +77,7 @@ export function createSplitOp(side) {
 
 /**
  * Creates a color mode operation
- * @param {'color'|'gray'|'bw'|'bw-otsu'} mode
+ * @param {'color'|'color-text'|'gray'|'gray-text'|'bw'|'bw-otsu'} mode
  */
 export function createColorModeOp(mode) {
   return { type: OperationType.COLOR_MODE, mode };

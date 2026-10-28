@@ -7,9 +7,10 @@ A native Linux version of the [web app](../README.md) for cleaning up scanned bo
 - Loads and merges PDFs, including encrypted ones that open without a password.
 - Reorders pages by dragging; rotates, splits double pages and deletes pages, with undo and redo.
 - Cleans up scans: grayscale, black and white (Otsu or Sauvola), shadow removal and contrast enhancement.
+- "Sharp text" modes split a scan into a full-resolution text layer and low-resolution image layers: text stays as sharp as the scan, pictures look as in grayscale or color, and files are about half the size of grayscale or less.
 - Keeps typeset pages as text (even when rotated or split), strips their text, or rasterizes them.
 - Adds an invisible OCR text layer with Tesseract, built into the binary; missing languages download on first use.
-- Writes small files: at "No compression" original scan images pass through untouched and grayscale keeps the JPEG's own luma data; black and white pages use lossless JBIG2; other pages use JPEG from [zenjpeg](https://github.com/imazen/zenjpeg).
+- Writes small files: at "No compression" original scan images pass through untouched and grayscale keeps the JPEG's own luma data; black and white pages and text layers use lossless JBIG2; other pages use JPEG from [zenjpeg](https://github.com/imazen/zenjpeg).
 
 ## Install
 

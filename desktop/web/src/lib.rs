@@ -61,7 +61,9 @@ struct WebPage {
 fn color_mode(mode: &str) -> Result<ColorMode> {
     Ok(match mode {
         "color" => ColorMode::Color,
+        "color-text" => ColorMode::ColorText,
         "gray" => ColorMode::Gray,
+        "gray-text" => ColorMode::GrayText,
         "bw-otsu" => ColorMode::BwFlat,
         "bw" => ColorMode::BwAdaptive,
         _ => bail!("unknown color mode '{mode}'"),

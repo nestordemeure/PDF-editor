@@ -10,18 +10,24 @@ use crate::geometry::{Matrix, Rect, rotate_cw_quarters};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColorMode {
     Color,
+    /// Text as a sharp bilevel layer over color image layers (`mrc`).
+    ColorText,
     Gray,
+    /// Text as a sharp bilevel layer over gray image layers (`mrc`).
+    GrayText,
     BwFlat,
     BwAdaptive,
 }
 
 impl ColorMode {
-    pub const ALL: [ColorMode; 4] = [ColorMode::Color, ColorMode::Gray, ColorMode::BwFlat, ColorMode::BwAdaptive];
+    pub const ALL: [ColorMode; 6] = [ColorMode::Color, ColorMode::ColorText, ColorMode::Gray, ColorMode::GrayText, ColorMode::BwFlat, ColorMode::BwAdaptive];
 
     pub fn label(self) -> &'static str {
         match self {
             ColorMode::Color => "Original colors",
+            ColorMode::ColorText => "Original colors (sharp text)",
             ColorMode::Gray => "Grayscale",
+            ColorMode::GrayText => "Grayscale (sharp text)",
             ColorMode::BwFlat => "B&W (flat)",
             ColorMode::BwAdaptive => "B&W (adaptive)",
         }
@@ -31,11 +37,27 @@ impl ColorMode {
         matches!(self, ColorMode::BwFlat | ColorMode::BwAdaptive)
     }
 
+    /// Text and image layers.
+    pub fn is_layered(self) -> bool {
+        matches!(self, ColorMode::ColorText | ColorMode::GrayText)
+    }
+
+    /// The mode of the pixels: of the image layers for layered modes.
+    pub fn image_mode(self) -> ColorMode {
+        match self {
+            ColorMode::ColorText => ColorMode::Color,
+            ColorMode::GrayText => ColorMode::Gray,
+            m => m,
+        }
+    }
+
     /// Short tag used in output file names.
     pub fn file_tag(self) -> &'static str {
         match self {
             ColorMode::Color => "",
+            ColorMode::ColorText => "text",
             ColorMode::Gray => "gray",
+            ColorMode::GrayText => "graytext",
             ColorMode::BwFlat => "bw",
             ColorMode::BwAdaptive => "bwprog",
         }
@@ -74,9 +96,9 @@ impl Compression {
 
     /// Maximum output resolution; `None` keeps the source resolution.
     pub fn max_dpi(self, mode: ColorMode) -> Option<f64> {
-        let table = match mode {
-            ColorMode::Color => [180.0, 150.0, 120.0],
-            ColorMode::Gray => [200.0, 150.0, 120.0],
+        let table = match mode.image_mode() {
+            ColorMode::Color | ColorMode::ColorText => [180.0, 150.0, 120.0],
+            ColorMode::Gray | ColorMode::GrayText => [200.0, 150.0, 120.0],
             ColorMode::BwFlat | ColorMode::BwAdaptive => [260.0, 200.0, 150.0],
         };
         match self {
