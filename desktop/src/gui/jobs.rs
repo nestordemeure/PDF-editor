@@ -130,16 +130,31 @@ fn load_one(path: &std::path::Path, tx: &Sender<Event>, ctx: &Context) -> anyhow
         ctx.request_repaint();
         choice = answer.recv().unwrap_or(TextChoice::Keep);
     }
-    let mut warning = None;
+    let mut warnings = Vec::new();
+    let unreadable: Vec<String> = source
+        .pages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| p.content.as_ref().err().map(|e| format!("page {}: {e}", i + 1)))
+        .collect();
+    if !unreadable.is_empty() {
+        warnings.push(format!(
+            "{}: {} page(s) could not be analyzed and will be rasterized: {}",
+            source.name,
+            unreadable.len(),
+            unreadable.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
+        ));
+    }
     if choice == TextChoice::Strip {
         let skipped = source.strip_text(&text_pages)?;
         if skipped > 0 {
-            warning = Some(format!(
+            warnings.push(format!(
                 "{}: {skipped} content stream(s) contain inline images and were left untouched; some text may remain.",
                 source.name
             ));
         }
     }
+    let warning = (!warnings.is_empty()).then(|| warnings.join("\n"));
     let kinds = source
         .pages
         .iter()

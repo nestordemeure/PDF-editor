@@ -13,6 +13,11 @@ use std::path::{Path, PathBuf};
 /// have text, are typeset pages. Scans with an OCR layer cover it all.
 const SCAN_COVERAGE: f64 = 0.9;
 
+/// Long side (points) beyond which a page is not a real book page (17 in,
+/// tabloid), and the long side such pages are assumed to have (A4).
+const OVERSIZED_PAGE: f64 = 17.0 * 72.0;
+const A4_LONG_SIDE: f64 = 297.0 / 25.4 * 72.0;
+
 pub struct Source {
     /// File name without extension.
     pub name: String,
@@ -38,6 +43,10 @@ pub struct SourcePage {
     /// What the page paints, or why it could not be read.
     pub content: Result<PageContent, String>,
     pub is_text_page: bool,
+    /// Factor from declared to physical resolution. Above 1 for pages
+    /// whose declared size cannot be a real book page (image converters
+    /// often write 72 or 96 DPI): those count as A4 for resolution choices.
+    pub ppi_factor: f64,
 }
 
 impl SourcePage {
@@ -122,7 +131,9 @@ impl Source {
                 Ok(c) => c.has_text && c.image_area() < SCAN_COVERAGE * page_box.area(),
                 Err(_) => false,
             };
-            pages.push(SourcePage { id, page_box, quarter_turns, display_size, user_to_display, content, is_text_page });
+            let long_side = display_size.0.max(display_size.1);
+            let ppi_factor = if long_side > OVERSIZED_PAGE { long_side / A4_LONG_SIDE } else { 1.0 };
+            pages.push(SourcePage { id, page_box, quarter_turns, display_size, user_to_display, content, is_text_page, ppi_factor });
         }
         Ok(pages)
     }

@@ -168,8 +168,42 @@ pub fn encode_jbig2(r: &Raster) -> Result<EncodedImage> {
         channels: 1,
         bits_per_component: 1,
         filter: ImageFilter::Jbig2,
-        data: result.page_data,
+        data: drop_mq_padding(&result.page_data)?,
     })
+}
+
+/// jbig2enc-rust ends each generic region with `FF FF AC`; the arithmetic
+/// coder's flush must drop a final `FF` before the `FF AC` marker (as C
+/// jbig2enc does), else readers report an extra byte.
+fn drop_mq_padding(data: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        let header_start = i;
+        let field = |at: usize, n: usize| data.get(at..at + n).context("truncated JBIG2 segment header");
+        let number = u32::from_be_bytes(field(i, 4)?.try_into().unwrap());
+        let flags = field(i + 4, 1)?[0];
+        let refs = field(i + 5, 1)?[0] >> 5;
+        if refs > 4 {
+            bail!("JBIG2 segment {number} uses the long referred-to form");
+        }
+        let ref_size = if number <= 256 { 1 } else if number <= 65536 { 2 } else { 4 };
+        i += 6 + refs as usize * ref_size + if flags & 0x40 != 0 { 4 } else { 1 };
+        let length = u32::from_be_bytes(field(i, 4)?.try_into().unwrap()) as usize;
+        i += 4;
+        let body = data.get(i..i + length).context("truncated JBIG2 segment")?;
+        let generic = matches!(flags & 0x3f, 38 | 39);
+        if generic && body.ends_with(&[0xFF, 0xFF, 0xAC]) {
+            out.extend_from_slice(&data[header_start..i - 4]);
+            out.extend_from_slice(&((length - 1) as u32).to_be_bytes());
+            out.extend_from_slice(&body[..length - 3]);
+            out.extend_from_slice(&[0xFF, 0xAC]);
+        } else {
+            out.extend_from_slice(&data[header_start..i + length]);
+        }
+        i += length;
+    }
+    Ok(out)
 }
 
 /// Lossless 8-bit image: per-row PNG filter choice (as libpng does), then
@@ -246,10 +280,18 @@ mod tests {
     fn jpeg_round_trip_keeps_size_and_quality_estimate() {
         let r = sample(3);
         let jpeg = encode_jpeg(&r, 80).unwrap();
-        let back = decode_jpeg(&jpeg.data, 3).unwrap();
+        let data = match jpeg.filter {
+            ImageFilter::FlateDct => {
+                let mut out = Vec::new();
+                std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(&jpeg.data[..]), &mut out).unwrap();
+                out
+            }
+            _ => jpeg.data,
+        };
+        let back = decode_jpeg(&data, 3).unwrap();
         assert_eq!((back.width, back.height), (r.width, r.height));
-        assert!(jpeg_quality(&jpeg.data).is_some());
-        let repacked = repack_jpeg(&jpeg.data).unwrap();
+        assert!(jpeg_quality(&data).is_some());
+        let repacked = repack_jpeg(&data).unwrap();
         assert_eq!(decode_jpeg(&repacked, 3).unwrap().data, back.data);
     }
 
@@ -268,5 +310,15 @@ mod tests {
         let r = Raster::new(200, 100, 1, data).unwrap();
         let e = encode_jbig2(&r).unwrap();
         assert!(!e.data.is_empty());
+        assert!(!e.data.windows(3).any(|w| w == [0xFF, 0xFF, 0xAC]));
+    }
+
+    #[test]
+    fn mq_padding_is_dropped_and_length_fixed() {
+        // Segment 1, immediate lossless generic region (type 38), page 1,
+        // 5 data bytes ending in FF FF AC.
+        let segment = [0, 0, 0, 1, 38, 0, 1, 0, 0, 0, 5, 0x12, 0x34, 0xFF, 0xFF, 0xAC];
+        let fixed = drop_mq_padding(&segment).unwrap();
+        assert_eq!(fixed, [0, 0, 0, 1, 38, 0, 1, 0, 0, 0, 4, 0x12, 0x34, 0xFF, 0xAC]);
     }
 }

@@ -121,6 +121,11 @@ fn main() -> Result<()> {
     });
     let mut pages = Vec::new();
     for (s, source) in sources.iter_mut().enumerate() {
+        for (i, p) in source.pages.iter().enumerate() {
+            if let Err(e) = &p.content {
+                eprintln!("warning: {} page {} could not be analyzed and will be rasterized: {e}", source.name, i + 1);
+            }
+        }
         let text_pages: Vec<usize> = (0..source.pages.len()).filter(|&i| source.pages[i].is_text_page).collect();
         if args.text == TextArg::Strip && !text_pages.is_empty() {
             let skipped = source.strip_text(&text_pages)?;

@@ -47,7 +47,9 @@ pub struct Thumbnails {
     tx: Sender<(ImageKey, Result<ColorImage, String>)>,
     rx: Receiver<(ImageKey, Result<ColorImage, String>)>,
     bases: BaseCache,
-    textures: HashMap<ImageKey, TextureHandle>,
+    /// Textures and the frame they were last used in.
+    textures: HashMap<ImageKey, (TextureHandle, u64)>,
+    frame: u64,
     pending: HashSet<ImageKey>,
     errors: HashMap<ImageKey, String>,
     /// Large images, oldest first, evicted beyond a few.
@@ -57,6 +59,8 @@ pub struct Thumbnails {
 /// Width (in pixels) under which images count as thumbnails and stay cached.
 const LARGE: u32 = 400;
 const KEPT_LARGE: usize = 6;
+/// Textures kept before the least recently used ones go (about 500 MB).
+const KEPT_TEXTURES: usize = 1500;
 
 impl Thumbnails {
     pub fn new(ctx: Context) -> Self {
@@ -70,6 +74,7 @@ impl Thumbnails {
             rx,
             bases: Default::default(),
             textures: HashMap::new(),
+            frame: 0,
             pending: HashSet::new(),
             errors: HashMap::new(),
             large: VecDeque::new(),
@@ -78,6 +83,13 @@ impl Thumbnails {
 
     /// Collects finished renders; call once per frame.
     pub fn poll(&mut self) {
+        self.frame += 1;
+        if self.textures.len() > KEPT_TEXTURES {
+            let mut ages: Vec<u64> = self.textures.values().map(|(_, used)| *used).collect();
+            ages.sort_unstable();
+            let cutoff = ages[self.textures.len() - KEPT_TEXTURES];
+            self.textures.retain(|_, (_, used)| *used >= cutoff);
+        }
         while let Ok((key, result)) = self.rx.try_recv() {
             self.pending.remove(&key);
             match result {
@@ -91,7 +103,7 @@ impl Thumbnails {
                             }
                         }
                     }
-                    self.textures.insert(key, texture);
+                    self.textures.insert(key, (texture, self.frame));
                 }
                 Err(e) => {
                     self.errors.insert(key, e);
@@ -107,7 +119,8 @@ impl Thumbnails {
     /// The page's image at `width` pixels, if ready; requests it otherwise.
     pub fn get(&mut self, sources: &[Arc<Source>], page: &Page, width: u32) -> Option<TextureHandle> {
         let key = ImageKey::new(page, width);
-        if let Some(t) = self.textures.get(&key) {
+        if let Some((t, used)) = self.textures.get_mut(&key) {
+            *used = self.frame;
             return Some(t.clone());
         }
         if self.pending.contains(&key) || self.errors.contains_key(&key) {
@@ -127,7 +140,7 @@ impl Thumbnails {
 
     /// Any image of the page already made, for display while the exact one renders.
     pub fn any_for(&self, page: &Page) -> Option<TextureHandle> {
-        self.textures.iter().find(|(k, _)| k.source == page.source && k.index == page.index).map(|(_, t)| t.clone())
+        self.textures.iter().find(|(k, _)| k.source == page.source && k.index == page.index).map(|(_, (t, _))| t.clone())
     }
 }
 
@@ -152,11 +165,15 @@ fn make_image(source: &Source, page: &Page, width: u32, bases: &BaseCache) -> an
             let ppp = base_width as f64 / sp.display_size.0;
             let b = Arc::new(render::render_page(&source.render_path, page.index, ppp, sp.display_size)?);
             if width <= LARGE {
-                bases.lock().unwrap().insert(key, b.clone());
+                let mut bases = bases.lock().unwrap();
+                if bases.len() >= KEPT_TEXTURES {
+                    bases.clear();
+                }
+                bases.insert(key, b.clone());
             }
             b
         }
     };
-    let image = pipeline::preview(&base, page, sp.display_size).to_rgb();
+    let image = pipeline::preview(&base, page, sp.display_size, sp.ppi_factor).to_rgb();
     Ok(ColorImage::from_rgb([image.width as usize, image.height as usize], &image.data))
 }

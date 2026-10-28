@@ -52,11 +52,14 @@ struct Placed {
     raster: Raster,
     /// Maps pixel coordinates (y down) to output points (y up).
     px_to_out: Matrix,
+    /// Declared to physical resolution (`SourcePage::ppi_factor`).
+    ppi_factor: f64,
 }
 
 impl Placed {
+    /// Physical resolution, which all resolution choices use.
     fn ppi(&self) -> f64 {
-        72.0 / self.px_to_out.det().abs().sqrt()
+        72.0 / self.px_to_out.det().abs().sqrt() * self.ppi_factor
     }
 
     /// Crops to the pixels that land on the output page.
@@ -72,7 +75,7 @@ impl Placed {
             bail!("image does not reach the page");
         }
         let raster = self.raster.crop(x0, y0, x1, y1);
-        Ok(Placed { raster, px_to_out: Matrix::translate(x0 as f64, y0 as f64).then(self.px_to_out) })
+        Ok(Placed { raster, px_to_out: Matrix::translate(x0 as f64, y0 as f64).then(self.px_to_out), ppi_factor: self.ppi_factor })
     }
 
     /// Downsamples so the resolution does not exceed `ppi`.
@@ -87,7 +90,7 @@ impl Placed {
         let nh = ((h as f64 * f).round() as u32).max(1);
         let raster = self.raster.resize(nw, nh)?;
         let px_to_out = Matrix::scale(w as f64 / nw as f64, h as f64 / nh as f64).then(self.px_to_out);
-        Ok(Placed { raster, px_to_out })
+        Ok(Placed { raster, px_to_out, ppi_factor: self.ppi_factor })
     }
 
 
@@ -107,7 +110,7 @@ impl Placed {
         } else {
             bail!("mirrored image placement is not supported for OCR");
         };
-        Ok(Placed { raster: self.raster.rotate_cw(turns), px_to_out: new_to_old.then(m) })
+        Ok(Placed { raster: self.raster.rotate_cw(turns), px_to_out: new_to_old.then(m), ppi_factor: self.ppi_factor })
     }
 }
 
@@ -185,7 +188,7 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
     // the level's resolution. When both are the same, clean up once.
     let same = placed.ppi().min(WORK_PPI) == placed.ppi().min(target_ppi);
     let ocr_placed = match (&engine, same) {
-        (Some(_), false) => Some(Placed { raster: placed.raster.clone(), px_to_out: placed.px_to_out }.limit_ppi(WORK_PPI)?),
+        (Some(_), false) => Some(Placed { raster: placed.raster.clone(), ..placed }.limit_ppi(WORK_PPI)?),
         _ => None,
     };
     let work = placed.limit_ppi(target_ppi)?;
@@ -196,9 +199,9 @@ pub fn process_page(source: &Source, page: &Page, settings: Settings, engine: Op
             let ocr_input = match ocr_placed {
                 Some(p) => {
                     let s = p.ppi() / 300.0;
-                    Placed { raster: pixel::apply_cleanup(p.raster, ops, s).to_gray(), px_to_out: p.px_to_out }
+                    Placed { raster: pixel::apply_cleanup(p.raster, ops, s).to_gray(), ..p }
                 }
-                None => Placed { raster: cleaned.to_gray(), px_to_out: work.px_to_out },
+                None => Placed { raster: cleaned.to_gray(), px_to_out: work.px_to_out, ppi_factor: work.ppi_factor },
             };
             Some(ocr_layer(engine, ocr_input)?)
         }
@@ -263,7 +266,7 @@ fn acquire(
             let raster = pdfimage::decode(&source.doc, id, &info, gray)?;
             let (w, h) = (raster.width as f64, raster.height as f64);
             let px_to_unit = Matrix::new(1.0 / w, 0.0, 0.0, -1.0 / h, 0.0, 1.0);
-            Placed { raster, px_to_out: px_to_unit.then(unit_to_display).then(to_out) }
+            Placed { raster, px_to_out: px_to_unit.then(unit_to_display).then(to_out), ppi_factor: sp.ppi_factor }
         }
         _ => {
             // Render at the resolution of the page's main image, if it has
@@ -271,9 +274,9 @@ fn acquire(
             let main = embedded.or_else(|| if page.kind == crate::model::PageKind::Scan { sp.main_image() } else { None });
             let ppi = match main {
                 Some((id, unit_to_display)) => native_ppi(source, id, unit_to_display)?.unwrap_or(WORK_PPI),
-                None => WORK_PPI,
+                None => WORK_PPI / sp.ppi_factor,
             }
-            .clamp(72.0, 600.0);
+            .clamp(72.0 / sp.ppi_factor, 600.0);
             // Bound memory: no render above MAX_RENDER_PIXELS.
             let (dw, dh) = sp.display_size;
             let cap = (MAX_RENDER_PIXELS / (dw / 72.0 * dh / 72.0)).sqrt();
@@ -285,7 +288,7 @@ fn acquire(
             let (w, h) = (raster.width as f64, raster.height as f64);
             let (dw, dh) = sp.display_size;
             let px_to_display = Matrix::new(dw / w, 0.0, 0.0, -dh / h, 0.0, dh);
-            Placed { raster, px_to_out: px_to_display.then(to_out) }
+            Placed { raster, px_to_out: px_to_display.then(to_out), ppi_factor: sp.ppi_factor }
         }
     };
     placed.crop_to_page(out_size)
@@ -310,7 +313,7 @@ fn native_ppi(source: &Source, id: ObjectId, unit_to_display: Matrix) -> Result<
 }
 
 fn ocr_layer(engine: &mut Engine, placed: Placed) -> Result<Vec<u8>> {
-    let up = Placed { raster: placed.raster.to_gray(), px_to_out: placed.px_to_out }.upright()?;
+    let up = Placed { raster: placed.raster.to_gray(), ..placed }.upright()?;
     let ppi = up.ppi().round() as u32;
     let lines = engine.recognize(&up.raster, ppi)?;
     Ok(ocr::text_layer(&lines, up.px_to_out))
@@ -372,11 +375,11 @@ pub fn color_tag(pages: &[Page]) -> &'static str {
 
 /// Preview of a page from a render of its source page (display space, any
 /// resolution): the same view and pixel operations as the saved page.
-pub fn preview(base: &Raster, page: &Page, display_size: (f64, f64)) -> Raster {
+pub fn preview(base: &Raster, page: &Page, display_size: (f64, f64), ppi_factor: f64) -> Raster {
     let c = page.view.crop;
     let (w, h) = (base.width as f64, base.height as f64);
     let cropped = base.crop((c.x0 * w).round() as u32, (c.y0 * h).round() as u32, (c.x1 * w).round() as u32, (c.y1 * h).round() as u32);
     let turned = cropped.rotate_cw(page.view.quarter_turns);
-    let ppi = base.width as f64 * 72.0 / display_size.0;
+    let ppi = base.width as f64 * 72.0 / display_size.0 * ppi_factor;
     pixel::apply_pixel_ops(turned, page.pixel_ops(), ppi / 300.0)
 }

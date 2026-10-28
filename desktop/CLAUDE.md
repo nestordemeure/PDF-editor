@@ -50,6 +50,8 @@ Dependency direction: `gui` → `save` → `pipeline` → `pixel`/`encode`/`rend
 - **MuPDF documents live in thread-locals.** Call `render::close_documents()` on every pool thread (`pool.broadcast`) before the pool drops. Else the process aborts at thread exit.
 - **Tesseract's C API defaults to one text block.** `Engine::new` sets `PSM_AUTO`. Without it, columns merge into one line.
 - **Fail loudly.** A page that fails stops the save with its page number. Designed fallbacks are only the equal-quality ones: keep the original stream when a re-encode is not smaller, render with MuPDF when an image codec is not decodable.
+- **Resolution choices use physical resolution.** Pages longer than 17 in (image converters write 72 or 96 DPI) count as A4: `SourcePage::ppi_factor` scales the declared resolution. Use `Placed::ppi()`, never the raw matrix, for DPI limits, pixel-operation scale and the resolution given to Tesseract.
+- **jbig2enc-rust leaves one `FF` before the `FF AC` end marker** of generic regions. `encode::drop_mq_padding` removes it (the output then equals C jbig2enc byte for byte). Keep it until upstream fixes the flush.
 - **JPEG quality numbers are libjpeg numbers.** `encode::encode_jpeg` maps them to zenjpeg settings of equal fidelity (`zenjpeg_setting`). Do not pass libjpeg numbers to zenjpeg directly.
 
 ## Testing
