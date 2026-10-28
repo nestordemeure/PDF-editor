@@ -38,6 +38,6 @@ Measured on a 20-thread laptop with OCR in English, against `ocrmypdf -O3 --redo
 
 | Input | ocrmypdf -O3 | PDF Editor |
 |---|---|---|
-| 330-page scan, original color kept | 272 s, 4.4 GB peak | 48 s, 1.5 GB peak |
+| 330-page scan, original color kept | 272 s, 4.4 GB peak | 32 s, 1.6 GB peak |
 | 11-page scan at the same resolution and better fidelity (38.1 dB against 37.1 dB) | 3.74 MB, 9.1 s | 3.54 MB, 2.2 s |
 | 255-page book scan | killed for lack of memory (12.5 GB) | 17 s, 1.25 GB peak, 30% of input at high compression |
