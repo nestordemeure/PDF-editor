@@ -24,16 +24,18 @@ $B IN.pdf -o OUT.pdf --mode bw-adaptive --remove-shading --enhance-contrast
 $B IN.pdf -o OUT.pdf --split --rotate 1            # split every page, then a quarter turn
 $B IN.pdf -o OUT.pdf --text strip                  # keep | strip | rasterize text pages
 $B IN.pdf -o OUT.pdf --threads 8                   # 0 = one per logical CPU
+$B IN.pdf -o OUT.pdf --compression low --mode color --dpi 600 --jpeg-quality 75   # override the level (benchmarks)
 ```
 
 - `--mode` applies to scan pages. If you give it, it also applies to text pages, which then rasterize.
 - `-o DIR` writes the default file name into DIR.
-- The last line reports pages, input and output bytes, load and save time, peak RSS, page routes (`Copied`, `PassThrough`, `Reencoded`, `Rendered`) and recompressed images.
+- The last line reports pages, input and output bytes, load and save time, peak RSS, page routes (`Copied`, `PassThrough`, `ExactGray`, `Reencoded`, `Rendered`) and recompressed images.
+- `--jpeg-quality` uses the libjpeg scale; the engine maps it to zenjpeg settings of equal fidelity.
 
 ## Validate an output
 
 ```bash
-qpdf --check OUT.pdf               # structure
+qpdf --check OUT.pdf               # structure; any WARNING (e.g. "JPEG data is corrupt") is a bug
 pdfimages -list OUT.pdf            # codec, bits, resolution, size per image
 pdftoppm -f 2 -l 2 -r 72 -png OUT.pdf /tmp/p    # visual check
 pdftotext -f 2 -l 2 OUT.pdf -       # OCR text and reading order

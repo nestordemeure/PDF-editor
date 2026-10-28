@@ -61,6 +61,8 @@ Dependency direction: `gui` → `save` → `pipeline` → `pixel`/`encode`/`rend
 
 ## Testing
 
+`cargo test --release` runs unit tests and `tests/save.rs`: end-to-end saves of synthetic PDFs built with lopdf (routes, pass-through bytes, exact gray, downsampling, JBIG2, split text pages, merge order, OCR). Add a test there for each new route or option.
+
 ```bash
 B=~/.cache/cargo-target/pdf-editor/release/pdf-editor-cli
 $B --info "../test data/input.pdf"                     # classification per page
