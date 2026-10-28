@@ -330,6 +330,8 @@ fn write_preserved_page(w: &mut PdfWriter, copier: &mut Copier, source: &Source,
     }
     // The view becomes a crop box and a rotation: text stays text.
     let crop = page.view.crop_in_display(sp.display_size).transform(sp.user_to_display.invert().context("degenerate page")?);
+    // Both boxes: some tools (poppler's pdftoppm, printers) use the media box.
+    out.set("MediaBox", rect_object(crop.x0, crop.y0, crop.x1, crop.y1));
     out.set("CropBox", rect_object(crop.x0, crop.y0, crop.x1, crop.y1));
     out.set("Rotate", Object::Integer((((sp.quarter_turns + page.view.quarter_turns) % 4) * 90) as i64));
     out.set("Parent", reference(parent));
