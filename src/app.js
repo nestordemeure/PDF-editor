@@ -39,6 +39,11 @@ const ocrLang = document.getElementById("ocrLang");
 // PDF.js renders thumbnails and the pages the engine cannot decode itself
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284/build/pdf.worker.min.mjs";
 
+/** Opens a PDF with PDF.js. Its JBIG2, JPEG 2000 and color decoders are WebAssembly modules found at wasmUrl. */
+function openPdf(data) {
+  return pdfjsLib.getDocument({ data, wasmUrl: "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284/wasm/" }).promise;
+}
+
 // State
 let pages = [];
 let history = [];
@@ -515,7 +520,7 @@ async function handleFiles(files) {
       const baseName = getFileStem(file.name) || "file";
       setStatus(`Reading ${file.name}...`);
       const loaded = await library("load", baseName, bytes.slice());
-      const pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+      const pdfDoc = await openPdf(bytes);
       const sourceId = createSourceId();
       const record = { engineId: loaded.id, pdfDoc, name: baseName, pages: loaded.pages };
       sourcePdfs.set(sourceId, record);
@@ -591,7 +596,7 @@ async function handleFiles(files) {
         const skipped = await library("strip_text", record.engineId, classicPages.map(page => page.sourcePageIndex));
         const stripped = await library("rewritten", record.engineId);
         await record.pdfDoc.destroy();
-        record.pdfDoc = await pdfjsLib.getDocument({ data: stripped }).promise;
+        record.pdfDoc = await openPdf(stripped);
         clearBaseThumbnailCache();
         for (const page of classicPages) page.textStripped = true;
         setStatus(`Updating thumbnails for ${source.name}...`);
