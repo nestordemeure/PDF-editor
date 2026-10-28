@@ -12,11 +12,23 @@ use pdf_editor::pipeline::PageRoute;
 use pdf_editor::save::{SaveOptions, default_file_name};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use thumbnails::Thumbnails;
+use thumbnails::{FULL_SCALE_DPI, Thumbnails};
 
 const CARD_WIDTH: f32 = 150.0;
 const CARD_HEIGHT: f32 = 242.0;
 const THUMB_HEIGHT: f32 = 210.0;
+const MAX_ZOOM: f32 = 8.0;
+/// Zoom factor per mouse wheel notch.
+const WHEEL_STEP: f32 = 1.25;
+
+/// A zoomed preview: the view center in fractions of the page, and screen
+/// pixels per full-scale pixel. Kept across pages, so they show the same spot.
+#[derive(Clone, Copy)]
+struct Zoom {
+    cx: f32,
+    cy: f32,
+    z: f32,
+}
 
 pub struct App {
     doc: Document,
@@ -30,6 +42,7 @@ pub struct App {
     errors: Vec<String>,
     text_question: Option<(String, usize, Sender<TextChoice>)>,
     preview: Option<u64>,
+    zoom: Option<Zoom>,
     /// Last clicked page, for shift-click ranges.
     anchor: Option<u64>,
     /// Index of the page being dragged.
@@ -62,6 +75,7 @@ impl App {
             errors: Vec::new(),
             text_question: None,
             preview: None,
+            zoom: None,
             anchor: None,
             dragging: None,
             last_dir: None,
@@ -185,7 +199,11 @@ impl App {
             self.doc.set_all_selected(true);
         }
         if pressed(Modifiers::NONE, Key::Escape) {
-            self.doc.set_all_selected(false);
+            if self.zoom.is_some() {
+                self.zoom = None;
+            } else {
+                self.doc.set_all_selected(false);
+            }
         }
         if pressed(Modifiers::NONE, Key::Delete) {
             self.doc.delete_selected();
@@ -340,27 +358,106 @@ impl App {
     }
 
     fn preview_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Preview");
+        ui.horizontal(|ui| {
+            ui.heading("Preview");
+            if self.zoom.is_some() {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Fit page").on_hover_text("Esc").clicked() {
+                        self.zoom = None;
+                    }
+                });
+            }
+        });
         let Some(entry) = self.preview.and_then(|id| self.doc.pages.iter().position(|e| e.id == id)) else {
             ui.label("Click a page to preview it.");
             return;
         };
         let page = self.doc.pages[entry].page.clone();
-        ui.label(format!("Page #{}", entry + 1));
-        let avail = ui.available_size();
+        let (page_w, page_h) = page.view.output_size(self.doc.sources[page.source].pages[page.index].display_size);
+        let aspect = (page_h / page_w) as f32;
         let ppp = ui.ctx().pixels_per_point();
+        let full = self.zoom.and_then(|_| self.thumbs.get_full_scale(&self.doc.sources, &page, self.compression));
+        let number = format!("Page #{}", entry + 1);
+        let failed = self.zoom.and(self.thumbs.full_scale_error(&page, self.compression));
+        let label = match (self.zoom, &full, failed) {
+            (None, _, _) => format!("{number} · click to zoom to full scale"),
+            (Some(_), None, Some(e)) => format!("{number} · full-scale render failed: {e}"),
+            (Some(zoom), None, None) => format!("{number} · {:.0}% · rendering at full scale...", zoom.z * 100.0),
+            (Some(zoom), Some(_), _) => format!("{number} · {:.0}% · drag to move, scroll to zoom, Esc to fit", zoom.z * 100.0),
+        };
+        ui.label(label);
+
+        let avail = ui.available_size();
+        let fit_width = avail.x.min(avail.y / aspect);
         // Width buckets avoid re-rendering on every resize step.
-        let width_px = ((avail.x * ppp / 200.0).ceil() * 200.0).clamp(200.0, 2400.0) as u32;
-        let texture = self.thumbs.get(&self.doc.sources, &page, width_px).or_else(|| self.thumbs.any_for(&page));
-        if let Some(t) = texture {
-            let size = t.size_vec2();
-            let scale = (avail.x / size.x).min(avail.y / size.y);
-            ui.add(egui::Image::new(&t).fit_to_exact_size(size * scale));
-        } else if let Some(e) = self.thumbs.error(&page, width_px) {
-            ui.colored_label(Color32::RED, e);
-        } else {
-            ui.spinner();
+        let width_px = ((fit_width * ppp / 200.0).ceil() * 200.0).clamp(200.0, 2400.0) as u32;
+        let fitted = self.thumbs.get(&self.doc.sources, &page, width_px).or_else(|| self.thumbs.any_for(&page));
+        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+
+        let Some(mut zoom) = self.zoom else {
+            let (rect, response) = ui.allocate_exact_size(Vec2::new(fit_width, fit_width * aspect), Sense::click());
+            match &fitted {
+                Some(t) => {
+                    ui.painter().image(t.id(), rect, uv, Color32::WHITE);
+                    if response.clicked()
+                        && let Some(pos) = response.interact_pointer_pos() {
+                            self.zoom = Some(Zoom { cx: (pos.x - rect.min.x) / rect.width(), cy: (pos.y - rect.min.y) / rect.height(), z: 1.0 });
+                        }
+                    response.on_hover_cursor(egui::CursorIcon::ZoomIn);
+                }
+                None => match self.thumbs.error(&page, width_px) {
+                    Some(e) => {
+                        ui.colored_label(Color32::RED, e);
+                    }
+                    None => {
+                        ui.put(rect, egui::Spinner::new());
+                    }
+                },
+            }
+            return;
+        };
+
+        // Zoomed: the fitted height, the panel's width.
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(avail.x, fit_width * aspect), Sense::click_and_drag());
+        // Page size in full-scale pixels
+        let page_px = Vec2::new(page_w as f32, page_h as f32) * (FULL_SCALE_DPI / 72.0) as f32;
+        let min_zoom = rect.width() * ppp / page_px.x;
+        let shown = |z: f32| page_px * z / ppp;
+        if let Some(pointer) = response.hover_pos() {
+            let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+            let factor: f32 = WHEEL_STEP.powf(scroll / 50.0) * pinch;
+            if factor != 1.0 {
+                // Keep the point under the pointer in place
+                let offset = pointer - rect.center();
+                let before = shown(zoom.z);
+                let (fx, fy) = (zoom.cx + offset.x / before.x, zoom.cy + offset.y / before.y);
+                zoom.z = (zoom.z * factor).clamp(min_zoom, MAX_ZOOM);
+                let after = shown(zoom.z);
+                zoom.cx = fx - offset.x / after.x;
+                zoom.cy = fy - offset.y / after.y;
+            }
         }
+        zoom.z = zoom.z.clamp(min_zoom, MAX_ZOOM);
+        let size = shown(zoom.z);
+        if response.dragged() {
+            let delta = response.drag_delta();
+            zoom.cx -= delta.x / size.x;
+            zoom.cy -= delta.y / size.y;
+        }
+        // Keep the view on the page; center it when it is wider than the page.
+        let clamp = |c: f32, view: f32| if view >= 1.0 { 0.5 } else { c.clamp(view / 2.0, 1.0 - view / 2.0) };
+        zoom.cx = clamp(zoom.cx, rect.width() / size.x);
+        zoom.cy = clamp(zoom.cy, rect.height() / size.y);
+        let page_rect = Rect::from_min_size(rect.center() - Vec2::new(zoom.cx * size.x, zoom.cy * size.y), size);
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, CornerRadius::ZERO, ui.visuals().extreme_bg_color);
+        // The fitted image stands in, blurred, until the full-scale one is ready.
+        if let Some(t) = full.as_ref().or(fitted.as_ref()) {
+            painter.image(t.id(), page_rect, uv, Color32::WHITE);
+        }
+        let cursor = if response.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
+        self.zoom = if response.double_clicked() { None } else { Some(zoom) };
+        response.on_hover_cursor(cursor);
     }
 
     fn page_grid(&mut self, ui: &mut egui::Ui) {

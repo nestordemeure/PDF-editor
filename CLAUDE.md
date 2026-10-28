@@ -29,7 +29,7 @@ Editing is **non-destructive**: pages store a source reference plus an operation
 
 - **Load**: the Library worker reads each file (decryption with the empty password, page classification, text stripping). PDF.js gets the same file, or the engine's rewrite after stripping.
 - **Thumbnails**: PDF.js renders the source page at 300 px wide; the engine's `preview` applies the view and pixel operations. This is the save's code, so the preview matches the output.
-- **Full-scale preview**: zooming the preview saves the active page alone at the current compression level (`preview_job`, then `preview_pdf`: independent of any save in progress) and PDF.js renders that PDF at 300 DPI. The zoom spot is kept in page fractions, so other pages show the same spot.
+- **Full-scale preview**: zooming the preview saves the active page alone at the current compression level (`preview_job`, then `preview_pdf`, which calls the engine's `single_page_pdf`; independent of any save in progress) and PDF.js renders that PDF at 300 DPI. The zoom spot is kept in page fractions, so other pages show the same spot.
 - **Save**: the Library worker plans the save and gives one job per page, with the source data it needs. Pixel workers run the jobs. Pages without a decodable scan image get a PDF.js render first. With OCR, tesseract.js reads the image the job returns, and the Library worker writes the text layer. Each finished page goes to the output at once; the output reaches the main thread in chunks, which become a `Blob`.
 
 ## Invariants — breaking these causes subtle bugs

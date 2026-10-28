@@ -3,7 +3,9 @@
 
 use lopdf::{Document, Object, Stream, dictionary};
 use pdf_editor::model::{ColorMode, Compression, Page, PageKind, Side};
-use pdf_editor::pipeline::PageRoute;
+use pdf_editor::assemble::single_page_pdf;
+use pdf_editor::pipeline::{PageRoute, Settings, process_page};
+use pdf_editor::render;
 use pdf_editor::pixel::Raster;
 use pdf_editor::save::{SaveOptions, SaveReport, save};
 use pdf_editor::source::Source;
@@ -349,4 +351,30 @@ fn ocr_finds_the_words_of_a_rendered_page() {
     let hex: String = "HELLO".encode_utf16().map(|u| format!("{u:04X}")).collect();
     assert!(content.contains(&hex), "text layer should contain HELLO");
     assert!(content.contains("3 Tr"), "text layer must be invisible");
+}
+
+#[test]
+fn full_scale_preview_is_the_saved_page() {
+    let f = Fixture::new();
+    scan_pdf(&f.path("scan.pdf"), 2, &scan_raster(1275, 1650));
+    text_pdf(&f.path("text.pdf"), 1, "Typeset text", 24.0);
+    let scan = Arc::new(Source::open(&f.path("scan.pdf")).unwrap());
+    let text = Arc::new(Source::open(&f.path("text.pdf")).unwrap());
+    let sources = vec![scan.clone(), text.clone()];
+    let mut pages = pages_of(0, &scan, PageKind::Text);
+    pages[1].color = ColorMode::BwAdaptive;
+    run(&sources, &pages, Compression::High, None, &f.path("out.pdf"));
+    let saved = output_images(&f.path("out.pdf"));
+
+    let settings = Settings { compression: Compression::High, ocr: false, max_dpi: None, jpeg_quality: None };
+    let output = process_page(&scan, &pages[1], settings, None).unwrap();
+    let pdf = single_page_pdf(sources.clone(), pages[1].clone(), Compression::High, Some(output)).unwrap();
+    std::fs::write(f.path("preview.pdf"), &pdf).unwrap();
+    assert_eq!(output_images(&f.path("preview.pdf"))[0].content, saved[1].content);
+    let image = render::render_first_page(&pdf, 300.0 / 72.0).unwrap();
+    assert_eq!((image.width, image.height), (2550, 3300));
+
+    let copied = single_page_pdf(sources, Page::new(1, 0, PageKind::Text), Compression::High, None).unwrap();
+    std::fs::write(f.path("copied.pdf"), &copied).unwrap();
+    assert_eq!(Document::load(f.path("copied.pdf")).unwrap().get_pages().len(), 1);
 }

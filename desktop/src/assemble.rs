@@ -4,8 +4,8 @@
 
 use crate::copy::Copier;
 use crate::encode::{self, EncodedImage, ImageFilter};
-use crate::model::Page;
-use crate::pipeline::{ImageOut, PageOutput, PageRoute};
+use crate::model::{Compression, Page};
+use crate::pipeline::{self, ImageOut, PageOutput, PageRoute};
 use crate::source::{Source, inherited};
 use crate::textlayer;
 use crate::writer::{OutId, PdfWriter, format_number, reference};
@@ -14,7 +14,7 @@ use lopdf::{Dictionary, Object, ObjectId};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SaveReport {
@@ -210,6 +210,46 @@ impl Assembler {
 }
 
 /// Image XObjects used by a page, including those inside its forms.
+/// A PDF of `page` alone, as a save at `compression` without OCR writes
+/// it, for full-scale previews. `output` is the result of the page's job;
+/// preserved pages have none.
+pub fn single_page_pdf(sources: Vec<Arc<Source>>, page: Page, compression: Compression, output: Option<PageOutput>) -> Result<Vec<u8>> {
+    if output.is_some() == page.is_preserved() {
+        bail!("a page job output is needed exactly when the page is not preserved");
+    }
+    let buffer = SharedBuffer::default();
+    let mut doc = Assembler::new(sources, vec![page], false, Box::new(buffer.clone()))?;
+    match output {
+        Some(output) => doc.write_raster_page(0, output)?,
+        None => {
+            for task in doc.preserved_images() {
+                let Some(job) = pipeline::image_job(&doc.sources[task.source], task.id, compression, task.shown_ppi)? else { continue };
+                if let Some(encoded) = pipeline::run_image_job(&job)? {
+                    doc.replace_image(task, encoded)?;
+                }
+            }
+            doc.write_preserved_pages(&mut || {})?;
+        }
+    }
+    doc.finish()?;
+    Ok(std::mem::take(&mut *buffer.0.lock().unwrap()))
+}
+
+/// In-memory output that stays readable after the writer is dropped.
+#[derive(Clone, Default)]
+struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn page_images(source: &Source, page_id: ObjectId) -> Vec<ObjectId> {
     let doc = &source.doc;
     let mut out = Vec::new();

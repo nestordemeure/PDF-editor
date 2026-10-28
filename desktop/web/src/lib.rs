@@ -3,7 +3,7 @@
 //! workers through the free functions, which need no source.
 
 use anyhow::{Context, Result, bail};
-use pdf_editor::assemble::{Assembler, ImageTask};
+use pdf_editor::assemble::{Assembler, ImageTask, single_page_pdf};
 use pdf_editor::geometry::Matrix;
 use pdf_editor::model::{ColorMode, Compression, Page, PageKind, Side, View};
 use pdf_editor::pipeline::{self, ImageJob, PageJob, PageOutput, Settings};
@@ -368,27 +368,8 @@ impl Library {
     /// the result of its preview job, or copied when it has none.
     pub fn preview_pdf(&self, page: JsValue, level: String, output: Option<Vec<u8>>) -> JsResult<Vec<u8>> {
         let page = self.checked_page(from_js(page)?).map_err(js_error)?;
-        let level = compression(&level).map_err(js_error)?;
-        let out = Sink::default();
-        let mut doc = Assembler::new(self.sources.clone(), vec![page], false, Box::new(out.clone())).map_err(js_error)?;
-        match output {
-            Some(bytes) => {
-                let output: PageOutput = postcard::from_bytes(&bytes).map_err(|e| JsError::new(&e.to_string()))?;
-                doc.write_raster_page(0, output).map_err(js_error)?;
-            }
-            None => {
-                for task in doc.preserved_images() {
-                    let source = doc.sources()[task.source].clone();
-                    let Some(job) = pipeline::image_job(&source, task.id, level, task.shown_ppi).map_err(js_error)? else { continue };
-                    if let Some(encoded) = pipeline::run_image_job(&job).map_err(js_error)? {
-                        doc.replace_image(task, encoded).map_err(js_error)?;
-                    }
-                }
-                doc.write_preserved_pages(&mut || {}).map_err(js_error)?;
-            }
-        }
-        doc.finish().map_err(js_error)?;
-        Ok(std::mem::take(&mut *out.0.borrow_mut()))
+        let output: Option<PageOutput> = output.map(|bytes| postcard::from_bytes(&bytes)).transpose().map_err(|e| JsError::new(&e.to_string()))?;
+        single_page_pdf(self.sources.clone(), page, compression(&level).map_err(js_error)?, output).map_err(js_error)
     }
 }
 

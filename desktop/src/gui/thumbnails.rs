@@ -1,11 +1,12 @@
 //! Background thumbnail and preview rendering. The UI thread asks for an
 //! image and gets it some frames later; it never waits for MuPDF.
 
-use egui::{ColorImage, Context, TextureHandle, TextureOptions};
-use pdf_editor::model::{Page, PageKind, PixelOps, SourceId};
+use egui::{ColorImage, Context, TextureFilter, TextureHandle, TextureOptions};
+use pdf_editor::model::{Compression, Page, PageKind, PixelOps, SourceId};
+use pdf_editor::pipeline::Settings;
 use pdf_editor::pixel::Raster;
 use pdf_editor::source::Source;
-use pdf_editor::{pipeline, render};
+use pdf_editor::{assemble, pipeline, render};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -20,6 +21,8 @@ pub struct ImageKey {
     view: [u64; 5],
     ops: PixelOps,
     width: u32,
+    /// Set for full-scale previews: the page as a save at this level writes it.
+    full_scale: Option<Compression>,
 }
 
 impl ImageKey {
@@ -32,7 +35,16 @@ impl ImageKey {
             view: [c.x0.to_bits(), c.y0.to_bits(), c.x1.to_bits(), c.y1.to_bits(), page.view.quarter_turns as u64],
             ops: page.pixel_ops(),
             width,
+            full_scale: None,
         }
+    }
+
+    fn full_scale(page: &Page, compression: Compression) -> Self {
+        ImageKey { full_scale: Some(compression), ..ImageKey::new(page, 0) }
+    }
+
+    fn is_large(&self) -> bool {
+        self.width > LARGE || self.full_scale.is_some()
     }
 }
 
@@ -61,6 +73,11 @@ const LARGE: u32 = 400;
 const KEPT_LARGE: usize = 6;
 /// Textures kept before the least recently used ones go (about 500 MB).
 const KEPT_TEXTURES: usize = 1500;
+/// Resolution of full-scale previews.
+pub const FULL_SCALE_DPI: f64 = 300.0;
+const MAX_FULL_SCALE_PIXELS: f64 = 20e6;
+/// Longest texture side that all graphics drivers accept.
+const MAX_TEXTURE_SIDE: f64 = 8192.0;
 
 impl Thumbnails {
     pub fn new(ctx: Context) -> Self {
@@ -94,8 +111,13 @@ impl Thumbnails {
             self.pending.remove(&key);
             match result {
                 Ok(image) => {
-                    let texture = self.ctx.load_texture(format!("{key:?}"), image, TextureOptions::LINEAR);
-                    if key.width > LARGE {
+                    // Enlarged full-scale pixels stay sharp.
+                    let options = match key.full_scale {
+                        Some(_) => TextureOptions { magnification: TextureFilter::Nearest, ..TextureOptions::LINEAR },
+                        None => TextureOptions::LINEAR,
+                    };
+                    let texture = self.ctx.load_texture(format!("{key:?}"), image, options);
+                    if key.is_large() {
                         self.large.push_back(key.clone());
                         while self.large.len() > KEPT_LARGE {
                             if let Some(old) = self.large.pop_front() {
@@ -118,7 +140,23 @@ impl Thumbnails {
 
     /// The page's image at `width` pixels, if ready; requests it otherwise.
     pub fn get(&mut self, sources: &[Arc<Source>], page: &Page, width: u32) -> Option<TextureHandle> {
-        let key = ImageKey::new(page, width);
+        let source = sources[page.source].clone();
+        let (page, bases) = (page.clone(), self.bases.clone());
+        self.get_or_request(ImageKey::new(&page, width), move || make_image(&source, &page, width, &bases))
+    }
+
+    /// The page as a save at `compression` writes it, rendered at
+    /// `FULL_SCALE_DPI`, if ready; requests it otherwise.
+    pub fn get_full_scale(&mut self, sources: &[Arc<Source>], page: &Page, compression: Compression) -> Option<TextureHandle> {
+        let (sources, page) = (sources.to_vec(), page.clone());
+        self.get_or_request(ImageKey::full_scale(&page, compression), move || make_full_scale_image(sources, &page, compression))
+    }
+
+    pub fn full_scale_error(&self, page: &Page, compression: Compression) -> Option<&String> {
+        self.errors.get(&ImageKey::full_scale(page, compression))
+    }
+
+    fn get_or_request(&mut self, key: ImageKey, make: impl FnOnce() -> anyhow::Result<ColorImage> + Send + 'static) -> Option<TextureHandle> {
         if let Some((t, used)) = self.textures.get_mut(&key) {
             *used = self.frame;
             return Some(t.clone());
@@ -127,11 +165,9 @@ impl Thumbnails {
             return None;
         }
         self.pending.insert(key.clone());
-        let source = sources[page.source].clone();
-        let page = page.clone();
-        let (tx, ctx, bases) = (self.tx.clone(), self.ctx.clone(), self.bases.clone());
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         self.pool.spawn(move || {
-            let result = make_image(&source, &page, width, &bases).map_err(|e| format!("{e:#}"));
+            let result = make().map_err(|e| format!("{e:#}"));
             let _ = tx.send((key, result));
             ctx.request_repaint();
         });
@@ -140,7 +176,7 @@ impl Thumbnails {
 
     /// Any image of the page already made, for display while the exact one renders.
     pub fn any_for(&self, page: &Page) -> Option<TextureHandle> {
-        self.textures.iter().find(|(k, _)| k.source == page.source && k.index == page.index).map(|(_, (t, _))| t.clone())
+        self.textures.iter().find(|(k, _)| k.source == page.source && k.index == page.index && k.full_scale.is_none()).map(|(_, (t, _))| t.clone())
     }
 }
 
@@ -175,5 +211,16 @@ fn make_image(source: &Source, page: &Page, width: u32, bases: &BaseCache) -> an
         }
     };
     let image = pipeline::preview(&base, page, sp.display_size, sp.ppi_factor).to_rgb();
+    Ok(ColorImage::from_rgb([image.width as usize, image.height as usize], &image.data))
+}
+
+fn make_full_scale_image(sources: Vec<Arc<Source>>, page: &Page, compression: Compression) -> anyhow::Result<ColorImage> {
+    let source = &sources[page.source];
+    let settings = Settings { compression, ocr: false, max_dpi: None, jpeg_quality: None };
+    let output = if page.is_preserved() { None } else { Some(pipeline::process_page(source, page, settings, None)?) };
+    let (w, h) = page.view.output_size(source.pages[page.index].display_size);
+    let ppp = (FULL_SCALE_DPI / 72.0).min((MAX_FULL_SCALE_PIXELS / (w * h).max(1.0)).sqrt()).min(MAX_TEXTURE_SIDE / w.max(h).max(1.0));
+    let pdf = assemble::single_page_pdf(sources, page.clone(), compression, output)?;
+    let image = render::render_first_page(&pdf, ppp)?;
     Ok(ColorImage::from_rgb([image.width as usize, image.height as usize], &image.data))
 }

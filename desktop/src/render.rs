@@ -3,7 +3,7 @@
 
 use crate::pixel::Raster;
 use anyhow::{Context, Result, bail};
-use mupdf::{Colorspace, Document, Matrix};
+use mupdf::{Colorspace, Document, Matrix, Page};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,22 +30,34 @@ pub fn render_page(path: &Path, index: usize, pixels_per_point: f64, expected_si
         if (size.0 - expected_size.0).abs() > 1.0 || (size.1 - expected_size.1).abs() > 1.0 {
             bail!("page {} is {size:?} in MuPDF but {expected_size:?} in the object model", index + 1);
         }
-        let s = pixels_per_point as f32;
-        let ctm = Matrix::new(s, 0.0, 0.0, s, -bounds.x0 * s, -bounds.y0 * s);
-        let pixmap = page.to_pixmap(&ctm, &Colorspace::device_rgb(), false, true)?;
-        let (w, h, n) = (pixmap.width(), pixmap.height(), pixmap.n() as usize);
-        if n != 3 {
-            bail!("MuPDF returned {n} channels");
-        }
-        let stride = pixmap.stride() as usize;
-        let samples = pixmap.samples();
-        let row = w as usize * 3;
-        let mut data = Vec::with_capacity(row * h as usize);
-        for y in 0..h as usize {
-            data.extend_from_slice(&samples[y * stride..y * stride + row]);
-        }
-        Raster::new(w, h, 3, data)
+        to_raster(&page, pixels_per_point)
     })
+}
+
+/// Renders the first page of an in-memory PDF to RGB at `pixels_per_point`.
+pub fn render_first_page(pdf: &[u8], pixels_per_point: f64) -> Result<Raster> {
+    let doc = Document::from_bytes(pdf, "application/pdf").context("MuPDF cannot open the PDF")?;
+    let page = doc.load_page(0).context("MuPDF cannot load the page")?;
+    to_raster(&page, pixels_per_point)
+}
+
+fn to_raster(page: &Page, pixels_per_point: f64) -> Result<Raster> {
+    let bounds = page.bounds()?;
+    let s = pixels_per_point as f32;
+    let ctm = Matrix::new(s, 0.0, 0.0, s, -bounds.x0 * s, -bounds.y0 * s);
+    let pixmap = page.to_pixmap(&ctm, &Colorspace::device_rgb(), false, true)?;
+    let (w, h, n) = (pixmap.width(), pixmap.height(), pixmap.n() as usize);
+    if n != 3 {
+        bail!("MuPDF returned {n} channels");
+    }
+    let stride = pixmap.stride() as usize;
+    let samples = pixmap.samples();
+    let row = w as usize * 3;
+    let mut data = Vec::with_capacity(row * h as usize);
+    for y in 0..h as usize {
+        data.extend_from_slice(&samples[y * stride..y * stride + row]);
+    }
+    Raster::new(w, h, 3, data)
 }
 
 /// Closes this thread's MuPDF documents (call when sources change).

@@ -28,14 +28,14 @@ cargo test --release
 | `src/mrc.rs` | "Sharp text" modes: splits a page into a bilevel text mask, a background without text and an ink color layer |
 | `src/jpeggray.rs` | Exact grayscale: luma DCT coefficients of a YCbCr JPEG written as a one-channel JPEG (own baseline Huffman writer) |
 | `src/encode.rs` | zenjpeg encode and decode, Flate wrapping of JPEGs; JBIG2 (lossless generic); Flate with PNG predictors |
-| `src/render.rs` | MuPDF rendering with per-thread documents |
+| `src/render.rs` | MuPDF rendering with per-thread documents, and of in-memory PDFs |
 | `src/ocr.rs` | Tesseract C API (statically linked), language files (native) |
 | `src/textlayer.rs` | The invisible text layer from OCR lines, and its font |
 | `src/pipeline.rs` | `page_job` reads what a raster page needs from its source; `run_page_job` makes its output image and OCR input; image jobs for text pages; `preview` for the UI |
 | `src/textcrop.rs` | Removes text runs outside a cropped text page (own byte-preserving tokenizer, glyph widths from the fonts) |
 | `src/copy.rs` | Copies object graphs from a source into the output |
 | `src/writer.rs` | Streaming PDF writer with object streams and an xref stream |
-| `src/assemble.rs` | Builds the output: copied text pages, raster pages, page tree. No threads |
+| `src/assemble.rs` | Builds the output: copied text pages, raster pages, page tree. No threads. `single_page_pdf` for full-scale previews |
 | `src/save.rs` | Native save orchestration: worker pool, bounded channel, temporary file (native) |
 | `web/` | The engine's JavaScript interface for the web app (`wasm-bindgen`) |
 | `src/gui/` | egui app: `document.rs` (state, undo), `thumbnails.rs` (background renders), `jobs.rs` (load and save threads), `mod.rs` (layout) |
@@ -56,7 +56,7 @@ Dependency direction: `gui` → `save` → `assemble`/`pipeline` → `pixel`/`en
 ## Invariants
 
 - **Page and image jobs do not read the source.** `page_job` copies what `run_page_job` needs (`PageJob`, `pdfimage::StoredImage`): the web app runs jobs in other WebAssembly instances. Rendering and OCR happen outside the job, through `PageJob::render` and `PageOutput::ocr`.
-- **Preview must equal output.** Thumbnails and saves both call `pixel::apply_pixel_ops`. Every pixel operation takes `scale` (resolution / 300 DPI) so its result does not depend on the working resolution.
+- **Preview must equal output.** Thumbnails and saves both call `pixel::apply_pixel_ops`. The zoomed preview of both apps is the saved page itself: the page saved alone (`single_page_pdf`) and rendered at 300 DPI. Every pixel operation takes `scale` (resolution / 300 DPI) so its result does not depend on the working resolution.
 - **Pixel operations run on the image in its own orientation.** Rotation and split only change the placement matrix. Only OCR rotates pixels (to upright).
 - **Memory is bounded by pages in flight.** Workers send finished pages through a `sync_channel` of capacity = threads; the writer puts each object on disk at once. Do not collect per-page results in memory.
 - **MuPDF documents live in thread-locals.** Call `render::close_documents()` on every pool thread (`pool.broadcast`) before the pool drops. Else the process aborts at thread exit.

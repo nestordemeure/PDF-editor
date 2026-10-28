@@ -21,7 +21,7 @@ It runs the same engine as the native Linux version in [`desktop/`](desktop/READ
 ## Usage
 
 1. **Load PDFs** and wait for the thumbnails.
-2. Select pages, then apply operations from the left sidebar. Click a page to preview it — the preview shows exactly what will be exported.
+2. Select pages, then apply operations from the left sidebar. Click a page to preview it: the preview shows exactly what will be exported. Click the preview to zoom to full scale; other pages then show the same spot, for comparisons.
 3. Pick a compression level and OCR language, then **Save PDF**.
 
 A typical book scan: select all, B&W (adaptive), Remove Shadows, high compression, OCR — a few hundred pages come out at ~25 KB per page with selectable text.
