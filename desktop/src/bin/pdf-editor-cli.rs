@@ -193,7 +193,7 @@ fn main() -> Result<()> {
     let mut routes: Vec<_> = report.routes.iter().map(|(r, n)| format!("{r:?}={n}")).collect();
     routes.sort();
     println!(
-        "{}: {} pages, {} -> {} bytes ({:.1}%), load {:.2}s, save {:.2}s, peak RSS {} MB, routes [{}], recompressed images {}",
+        "{}: {} pages, {} -> {} bytes ({:.1}%), load {:.2}s, save {:.2}s, peak RSS {} MB, routes [{}], recompressed images {}, hidden text runs removed {}",
         output.display(),
         report.pages,
         input_bytes,
@@ -203,7 +203,11 @@ fn main() -> Result<()> {
         report.seconds,
         pdf_editor::peak_rss_mb(),
         routes.join(" "),
-        report.recompressed_images
+        report.recompressed_images,
+        report.hidden_text_removed
     );
+    if report.hidden_text_kept_pages > 0 {
+        eprintln!("warning: {} cropped text pages could not be filtered; their hidden text remains", report.hidden_text_kept_pages);
+    }
     Ok(())
 }

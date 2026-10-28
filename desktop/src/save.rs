@@ -37,6 +37,11 @@ pub struct SaveReport {
     pub pages: usize,
     pub routes: HashMap<PageRouteKey, usize>,
     pub recompressed_images: usize,
+    /// Text runs removed from cropped text pages (outside their half).
+    pub hidden_text_removed: usize,
+    /// Cropped text pages whose content could not be filtered (their
+    /// hidden text remains).
+    pub hidden_text_kept_pages: usize,
     pub bytes: u64,
     pub seconds: f64,
 }
@@ -170,7 +175,10 @@ fn write_document(sources: &[Arc<Source>], pages: &[Page], options: &SaveOptions
             copiers[s].replacements.insert(id, Object::Stream(lopdf::Stream::new(replacement_dict(original, &encoded), encoded.data)));
         }
         for &i in &preserved {
-            write_preserved_page(&mut w, &mut copiers[pages[i].source], &sources[pages[i].source], &pages[i], layout.page_ids[i], layout.pages_root)?;
+            match write_preserved_page(&mut w, &mut copiers[pages[i].source], &sources[pages[i].source], &pages[i], layout.page_ids[i], layout.pages_root)? {
+                Some(n) => report.hidden_text_removed += n,
+                None => report.hidden_text_kept_pages += 1,
+            }
             *report.routes.entry(PageRoute::Copied).or_default() += 1;
             tick("Copying text pages");
         }
@@ -330,10 +338,43 @@ fn rect_object(x0: f64, y0: f64, x1: f64, y1: f64) -> Object {
     Object::Array(vec![number(x0), number(y0), number(x1), number(y1)])
 }
 
-fn write_preserved_page(w: &mut PdfWriter, copier: &mut Copier, source: &Source, page: &Page, out_id: OutId, parent: OutId) -> Result<()> {
+/// Copies a text page. Returns how many hidden text runs were removed, or
+/// `None` when the page is cropped but its content could not be filtered.
+fn write_preserved_page(w: &mut PdfWriter, copier: &mut Copier, source: &Source, page: &Page, out_id: OutId, parent: OutId) -> Result<Option<usize>> {
     let sp = &source.pages[page.index];
-    let dict = source.doc.get_dictionary(sp.id)?;
-    let mut out = copier.convert_page(w, dict);
+    let crop = page.view.crop_in_display(sp.display_size).transform(sp.user_to_display.invert().context("degenerate page")?);
+    // A cropped page (half of a spread) drops the text it no longer shows.
+    let mut filtered = None;
+    let mut removed = Some(0);
+    if !page.view.is_identity() {
+        let resources = match inherited(&source.doc, sp.id, b"Resources") {
+            Some(Object::Dictionary(d)) => d,
+            _ => Dictionary::new(),
+        };
+        let content = crate::content::page_content_bytes(&source.doc, sp.id)?;
+        match crate::textcrop::drop_text_outside(&source.doc, &resources, &content, crop) {
+            // Each half then needs its own content instead of a shared one:
+            // worth it only when the other half's text goes (a spread).
+            Ok(Some(cropped)) if cropped.content.len() * 100 <= content.len() * 55 => {
+                removed = Some(cropped.removed);
+                filtered = Some(cropped.content);
+            }
+            Ok(_) => {}
+            Err(_) => removed = None,
+        }
+    }
+    let mut dict = source.doc.get_dictionary(sp.id)?.clone();
+    if filtered.is_some() {
+        dict.remove(b"Contents");
+    }
+    let mut out = copier.convert_page(w, &dict);
+    if let Some(content) = filtered {
+        let id = w.alloc();
+        let mut d = Dictionary::new();
+        d.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        w.write_stream(id, d, encode::zlib(&content))?;
+        out.set("Contents", reference(id));
+    }
     for key in [&b"MediaBox"[..], b"Resources"] {
         if !out.has(key)
             && let Some(value) = inherited(&source.doc, sp.id, key) {
@@ -342,14 +383,14 @@ fn write_preserved_page(w: &mut PdfWriter, copier: &mut Copier, source: &Source,
             }
     }
     // The view becomes a crop box and a rotation: text stays text.
-    let crop = page.view.crop_in_display(sp.display_size).transform(sp.user_to_display.invert().context("degenerate page")?);
     // Both boxes: some tools (poppler's pdftoppm, printers) use the media box.
     out.set("MediaBox", rect_object(crop.x0, crop.y0, crop.x1, crop.y1));
     out.set("CropBox", rect_object(crop.x0, crop.y0, crop.x1, crop.y1));
     out.set("Rotate", Object::Integer((((sp.quarter_turns + page.view.quarter_turns) % 4) * 90) as i64));
     out.set("Parent", reference(parent));
     w.write(out_id, &Object::Dictionary(out))?;
-    copier.flush(w)
+    copier.flush(w)?;
+    Ok(removed)
 }
 
 fn write_raster_page(

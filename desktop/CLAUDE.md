@@ -29,6 +29,7 @@ cargo test --release
 | `src/render.rs` | MuPDF rendering with per-thread documents |
 | `src/ocr.rs` | Tesseract C API (statically linked) and the invisible text layer |
 | `src/pipeline.rs` | One raster page to an output image and text layer; `preview` for the UI |
+| `src/textcrop.rs` | Removes text runs outside a cropped text page (own byte-preserving tokenizer, glyph widths from the fonts) |
 | `src/copy.rs` | Copies object graphs from a source into the output |
 | `src/writer.rs` | Streaming PDF writer with object streams and an xref stream |
 | `src/save.rs` | Save orchestration: worker pool, bounded channel, page tree, OCR font |
@@ -41,7 +42,7 @@ Dependency direction: `gui` → `save` → `pipeline` → `pixel`/`encode`/`rend
 `pipeline::plan` decides the intended route without decoding pixels; `pipeline::intended_route` exposes it (the GUI status bar shows the counts). Keep the decision there, not in callers.
 
 
-- **Copied**: a text page with no pixel operations. The page objects are copied. The view becomes `/CropBox` and `/Rotate`, so split and rotation keep the text.
+- **Copied**: a text page with no pixel operations. The page objects are copied. The view becomes `/MediaBox`, `/CropBox` and `/Rotate`, so split and rotation keep the text. A cropped page gets its own content without the text runs that lie wholly outside it, but only when that content is at most 55% of the original: each half then needs its own copy instead of a shared one. Never re-encode content streams with lopdf (`Content::encode`): it changed the rendering of real pages; cut bytes instead.
 - **PassThrough**: a scan page with no pixel operations, at "No compression" or when re-encoding is not smaller. The original image stream is reused, wrapped in Flate when that saves 1%. Do not use zenjpeg's `restructure`: its output has stray bytes before scan markers (libjpeg warns "extraneous bytes").
 - **ExactGray**: "No compression" + grayscale (no cleanup) on a YCbCr JPEG scan. The luma coefficients are kept as they are; accepted up to 10% above the original size (it is baseline, originals are often progressive).
 - **Reencoded**: the scan image is decoded at its own resolution, cropped, downsampled to the level's DPI, processed and encoded.

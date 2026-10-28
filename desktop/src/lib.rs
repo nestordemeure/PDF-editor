@@ -13,6 +13,7 @@ pub mod pixel;
 pub mod render;
 pub mod save;
 pub mod source;
+pub mod textcrop;
 pub mod writer;
 
 /// Process-wide setup; call first in `main`.
