@@ -15,7 +15,7 @@ use std::sync::mpsc::Sender;
 use thumbnails::Thumbnails;
 
 const CARD_WIDTH: f32 = 150.0;
-const CARD_HEIGHT: f32 = 236.0;
+const CARD_HEIGHT: f32 = 242.0;
 const THUMB_HEIGHT: f32 = 210.0;
 
 pub struct App {
@@ -43,6 +43,7 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> Self {
         let ctx = cc.egui_ctx.clone();
+        ctx.all_styles_mut(enlarge_text);
         let mut languages: Vec<String> = pdf_editor::ocr::COMMON_LANGUAGES.iter().map(|(c, _)| c.to_string()).collect();
         for lang in pdf_editor::ocr::available_languages() {
             if !languages.contains(&lang) {
@@ -228,7 +229,7 @@ impl App {
             if let Some(job) = &self.jobs.current {
                 let p = job.snapshot();
                 let fraction = if p.total > 0 { p.done as f32 / p.total as f32 } else { 0.0 };
-                ui.add(egui::ProgressBar::new(fraction).desired_width(220.0).text(format!("{}/{}", p.done, p.total)));
+                ui.add(egui::ProgressBar::new(fraction).desired_width(260.0).text(format!("{}/{}", p.done, p.total)));
                 ui.label(&p.message);
                 if job.cancelling() {
                     ui.label("Cancelling…");
@@ -288,7 +289,7 @@ impl App {
         ui.add_space(4.0);
         let enabled = !self.jobs.busy() && !self.doc.selected.is_empty();
         let wide = |ui: &mut egui::Ui, text: &str, hint: &str| {
-            ui.add_enabled(enabled, egui::Button::new(text).min_size(Vec2::new(ui.available_width(), 24.0))).on_hover_text(hint).clicked()
+            ui.add_enabled(enabled, egui::Button::new(text).min_size(Vec2::new(ui.available_width(), 30.0))).on_hover_text(hint).clicked()
         };
         if wide(ui, "🗑 Delete pages", "Delete") {
             self.doc.delete_selected();
@@ -426,12 +427,12 @@ impl App {
                         }
                         None => {
                             let text = if self.thumbs.error(&entry.page, thumb_px).is_some() { "render error" } else { "…" };
-                            painter.text(thumb_area.center(), Align2::CENTER_CENTER, text, FontId::proportional(14.0), visuals.weak_text_color());
+                            painter.text(thumb_area.center(), Align2::CENTER_CENTER, text, FontId::proportional(18.0), visuals.weak_text_color());
                         }
                     }
-                    let row_y = rect.max.y - 14.0;
+                    let row_y = rect.max.y - 15.0;
                     let text_color = visuals.text_color();
-                    painter.text(Pos2::new(rect.min.x + 8.0, row_y), Align2::LEFT_CENTER, format!("#{}", i + 1), FontId::proportional(13.0), text_color);
+                    painter.text(Pos2::new(rect.min.x + 8.0, row_y), Align2::LEFT_CENTER, format!("#{}", i + 1), FontId::proportional(17.0), text_color);
                     let badge = match entry.page.kind {
                         PageKind::Text => Some("text"),
                         PageKind::TextStripped => Some("stripped"),
@@ -440,15 +441,15 @@ impl App {
                     if let Some(badge) = badge {
                         let color = if entry.page.is_preserved() { Color32::from_rgb(60, 140, 90) } else { Color32::from_rgb(170, 120, 40) };
                         let pos = Pos2::new(rect.center().x, row_y);
-                        let galley = painter.layout_no_wrap(badge.to_owned(), FontId::proportional(11.0), Color32::WHITE);
+                        let galley = painter.layout_no_wrap(badge.to_owned(), FontId::proportional(14.0), Color32::WHITE);
                         let r = Rect::from_center_size(pos, galley.size() + Vec2::new(8.0, 2.0));
                         painter.rect_filled(r, CornerRadius::same(4), color);
                         painter.galley(r.min + Vec2::new(4.0, 1.0), galley, Color32::WHITE);
                     }
-                    let check = Rect::from_center_size(Pos2::new(rect.max.x - 16.0, row_y), Vec2::splat(14.0));
+                    let check = Rect::from_center_size(Pos2::new(rect.max.x - 16.0, row_y), Vec2::splat(17.0));
                     painter.rect_stroke(check, CornerRadius::same(3), Stroke::new(1.5, text_color), StrokeKind::Inside);
                     if selected {
-                        painter.text(check.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(12.0), text_color);
+                        painter.text(check.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), text_color);
                     }
                 }
             });
@@ -496,12 +497,12 @@ impl App {
         if let Some((name, count, reply)) = &self.text_question {
             let mut answer = None;
             egui::Modal::new(Id::new("text-question")).show(ctx, |ui| {
-                ui.set_max_width(460.0);
+                ui.set_max_width(600.0);
                 ui.heading("This PDF contains text");
                 ui.label(format!("{name} has {count} page(s) with real (typeset) text."));
                 ui.add_space(8.0);
                 let choice = |ui: &mut egui::Ui, title: &str, detail: &str| {
-                    let r = ui.add(egui::Button::new(egui::RichText::new(title).strong()).min_size(Vec2::new(440.0, 28.0)));
+                    let r = ui.add(egui::Button::new(egui::RichText::new(title).strong()).min_size(Vec2::new(580.0, 34.0)));
                     ui.small(detail);
                     ui.add_space(6.0);
                     r.clicked()
@@ -530,7 +531,7 @@ impl App {
         if let Some(error) = self.errors.first().cloned() {
             let mut dismissed = false;
             egui::Modal::new(Id::new("error")).show(ctx, |ui| {
-                ui.set_max_width(520.0);
+                ui.set_max_width(680.0);
                 ui.heading("Error");
                 ui.label(&error);
                 ui.add_space(8.0);
@@ -546,6 +547,18 @@ impl App {
 }
 
 /// The web app's multi-language choice.
+/// Text sizes 1.4 times the egui defaults, with padding to match.
+fn enlarge_text(style: &mut egui::Style) {
+    use egui::TextStyle;
+    for (text_style, size) in [(TextStyle::Small, 14.0), (TextStyle::Body, 17.5), (TextStyle::Button, 17.5), (TextStyle::Heading, 24.0), (TextStyle::Monospace, 16.0)] {
+        if let Some(font) = style.text_styles.get_mut(&text_style) {
+            font.size = size;
+        }
+    }
+    style.spacing.button_padding = Vec2::new(8.0, 4.0);
+    style.spacing.interact_size.y = 26.0;
+}
+
 const MULTI: &str = "eng+fra+deu+spa+ita+por";
 
 fn language_label(code: &str) -> String {
@@ -598,11 +611,11 @@ impl eframe::App for App {
             ui.add_space(2.0);
             self.status_bar(ui);
         });
-        egui::Panel::left("operations").resizable(false).default_size(190.0).show(ui, |ui| {
+        egui::Panel::left("operations").resizable(false).default_size(250.0).show(ui, |ui| {
             ui.add_space(6.0);
             self.operations(ui);
         });
-        egui::Panel::right("preview").resizable(true).default_size(440.0).min_size(320.0).show(ui, |ui| {
+        egui::Panel::right("preview").resizable(true).default_size(480.0).min_size(360.0).show(ui, |ui| {
             ui.add_space(6.0);
             self.preview_panel(ui);
         });
