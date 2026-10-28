@@ -151,10 +151,24 @@ fn scaled_radius(base: f64, scale: f64, min: usize) -> usize {
 /// Flattens uneven lighting (scanner shadows, page curvature) by dividing
 /// each channel by an estimate of the paper background. The background is
 /// a max filter (which erases text strokes) followed by a smooth blur.
+/// Where that filtered image is still textured, the area is a picture,
+/// not paper, and is left as it is.
 fn remove_shading(r: &Raster, scale: f64) -> Raster {
     let (w, h, c) = (r.width as usize, r.height as usize, r.channels as usize);
     let dilate = scaled_radius(12.0, scale, 1);
     let blur = scaled_radius(25.0, scale, 1);
+    let paper_weight = {
+        let luma = r.to_gray();
+        let dilated = max_filter(&luma.data, w, h, dilate);
+        let mut mean = dilated.clone();
+        box_blur3(&mut mean, w, h, blur);
+        let texture: Vec<u8> = dilated.iter().zip(&mean).map(|(&d, &m)| d.abs_diff(m)).collect();
+        // Below 4 levels of texture: paper (weight 255); above 16: picture
+        // (0). A wide blur keeps the transition invisible.
+        let mut weight: Vec<u8> = texture.iter().map(|&t| ((16.0 - t as f32).clamp(0.0, 12.0) / 12.0 * 255.0) as u8).collect();
+        box_blur3(&mut weight, w, h, blur * 3);
+        weight.iter().map(|&v| v as f32 / 255.0).collect::<Vec<f32>>()
+    };
     let mut out = vec![0u8; r.data.len()];
     for ch in 0..c {
         let plane: Vec<u8> = r.data.iter().skip(ch).step_by(c).copied().collect();
@@ -162,8 +176,10 @@ fn remove_shading(r: &Raster, scale: f64) -> Raster {
         box_blur3(&mut bg, w, h, blur);
         for i in 0..w * h {
             // Within 8% of the background counts as paper: pure white.
-            let b = (bg[i].max(1) as u32 * 92).div_ceil(100);
-            out[i * c + ch] = ((plane[i] as u32 * 255 + b / 2) / b).min(255) as u8;
+            let b = bg[i].max(1) as f32 * 0.92;
+            let v = plane[i] as f32;
+            let corrected = (v * 255.0 / b).min(255.0);
+            out[i * c + ch] = (v + paper_weight[i] * (corrected - v)).round() as u8;
         }
     }
     Raster { width: r.width, height: r.height, channels: r.channels, data: out }
